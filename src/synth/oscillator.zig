@@ -3,6 +3,7 @@ const globalAlloc = @import("../memory/memory.zig").globalAlloc;
 
 const Wavetables = @import("tables.zig").Wavetables;
 const TABLE_SIZE: usize = 2048;
+pub const SAMPLE_RATE_HZ: f32 = 48000.0;
 
 pub const Oscillator = struct {
     // Current position in the wavetable, as a fractional index.
@@ -38,8 +39,8 @@ pub const Oscillator = struct {
     
     // Calculates and sets the phase increment based on desired frequency
     // sample_rate is typically 44100.0 or 48000.0
-    pub fn setFrequency(self: *Oscillator, frequency: f32, sample_rate: f32) void {
-        const normalized_freq = frequency / sample_rate;
+    pub fn setFrequency(self: *Oscillator, frequency: f32) void {
+        const normalized_freq = frequency / SAMPLE_RATE_HZ;
         self.phase_increment = normalized_freq * @as(f32, TABLE_SIZE);
     }
 
@@ -84,3 +85,4 @@ pub const Oscillator = struct {
         return sample;
     }
 };
+
