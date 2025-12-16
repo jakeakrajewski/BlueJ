@@ -1,6 +1,7 @@
 const std = @import("std");
 const BlueJ = @import("BlueJ");
 const builtin = @import("builtin");
+const mem = @import("memory/memory.zig");
 
 const is_stm32 = blk: {
     const target = builtin.target;
@@ -23,6 +24,7 @@ pub const AudioBackend = blk: {
 };
 
 pub fn main() !void {
+    mem.initMemory();
     try AudioBackend.init();
     AudioBackend.start();
 }

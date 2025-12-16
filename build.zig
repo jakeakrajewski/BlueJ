@@ -85,7 +85,7 @@ pub fn build(b: *std.Build) void {
 
     if (target.result.os.tag == .macos ){
         exe.linkFramework("AudioToolbox");
-        exe.linkFramework("Audiounit");
+        exe.linkFramework("AudioUnit");
         exe.linkFramework("CoreAudio");
         exe.linkFramework("CoreFoundation");
         exe.linkLibC();

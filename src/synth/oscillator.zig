@@ -1,88 +1,157 @@
 const std = @import("std");
-const globalAlloc = @import("../memory/memory.zig").globalAlloc;
+const tables_mod = @import("tables.zig");
 
-const Wavetables = @import("tables.zig").Wavetables;
-const TABLE_SIZE: usize = 2048;
-pub const SAMPLE_RATE_HZ: f32 = 48000.0;
+const TABLE_SIZE = tables_mod.TABLE_SIZE;
+
+pub const SAMPLE_RATE: f32 = 48_000.0;
+
+/// ===========================================================
+/// OSCILLATOR
+/// ===========================================================
 
 pub const Oscillator = struct {
-    // Current position in the wavetable, as a fractional index.
-    // This allows for smooth movement between integer table indices.
-    phase: f32, 
-    
-    // How much to advance the phase on each sample.
-    // phaseIncrement = (frequency / sample_rate) * TABLE_SIZE
-    phase_increment: f32, 
-    
-    // Pointer to the set of tables created earlier.
-    tables: *const Wavetables, 
-    
-    // Which waveform is currently active.
-    waveform: Waveform,
-    
+    /// Normalized phase [0..1)
+    phase: f32 = 0.0,
+
+    /// Phase increment per sample
+    phase_inc: f32 = 0.0,
+
+    /// Base frequency (Hz)
+    frequency: f32 = 440.0,
+
+    /// Wavetable references
+    tables: tables_mod.Wavetables,
+
+    /// Oscillator waveform
+    waveform: Waveform = .saw,
+
+    /// Hard sync
+    sync_slave: ?*Oscillator = null,
+
+    /// Unison
+    unison_count: u8 = 1,
+    unison_detune_cents: f32 = 0.0,
+
+    /// Per-unison phases
+    unison_phases: [MAX_UNISON]f32 = [_]f32{0.0} ** MAX_UNISON,
+
+    pub const MAX_UNISON = 8;
+
     pub const Waveform = enum {
         sine,
-        square,
-        saw,
         tri,
+        saw,
+        square,
     };
 
-    // Initialize a new oscillator
-    pub fn init(tables: *const Wavetables) Oscillator {
-        return Oscillator {
-            .phase = 0.0,
-            .phase_increment = 0.0, // Set later by setFrequency()
+    /// -------------------------------------------------------
+    /// INIT
+    /// -------------------------------------------------------
+
+    pub fn init(tables: tables_mod.Wavetables) Oscillator {
+        return .{
             .tables = tables,
-            .waveform = .sine,
         };
-    }
-    
-    // Calculates and sets the phase increment based on desired frequency
-    // sample_rate is typically 44100.0 or 48000.0
-    pub fn setFrequency(self: *Oscillator, frequency: f32) void {
-        const normalized_freq = frequency / SAMPLE_RATE_HZ;
-        self.phase_increment = normalized_freq * @as(f32, TABLE_SIZE);
     }
 
-    // --- Core Sample Generation Function ---
-    // Returns the next sample value (f32 between -1.0 and 1.0)
+    /// -------------------------------------------------------
+    /// CONTROL
+    /// -------------------------------------------------------
+
+    pub fn reset(self: *Oscillator) void {
+        self.phase = 0.0;
+        for (&self.unison_phases) |*p| p.* = 0.0;
+    }
+
+    pub fn setFrequency(self: *Oscillator, freq: f32) void {
+        self.frequency = freq;
+        self.phase_inc = freq / SAMPLE_RATE;
+    }
+
+    pub fn setWaveform(self: *Oscillator, wf: Waveform) void {
+        self.waveform = wf;
+    }
+
+    pub fn setUnison(self: *Oscillator, count: u8, detune_cents: f32) void {
+        self.unison_count = std.math.clamp(count, 1, MAX_UNISON);
+        self.unison_detune_cents = detune_cents;
+    }
+
+    pub fn setSyncMaster(self: *Oscillator, master: ?*Oscillator) void {
+        self.sync_master = master;
+    }
+
+    /// -------------------------------------------------------
+    /// SAMPLE GENERATION
+    /// -------------------------------------------------------
+
     pub fn nextSample(self: *Oscillator) f32 {
-        // 1. Get the current wavetable based on the selected waveform
-        const table_data: []f32 = switch (self.waveform) {
-            .sine => self.tables.sine.data,
-            .square => self.tables.square.data,
-            .saw => self.tables.saw.data,
-            .tri => self.tables.tri.data,
-        };
-        
-        // 2. Calculate the sample index and the fractional part for interpolation
-        // @floor(self.phase) gives the integer index for the sample before the phase
-        const index_f32 = self.phase;
-        const index_a: usize = @int(index_f32); 
-        
-        // The fractional part (0.0 to 1.0) determines how much to blend sample A and B
-        const frac = index_f32 - @floor(index_f32); 
-        
-        // 3. Find the next sample index (B) for interpolation
-        // The % TABLE_SIZE ensures we wrap around the table correctly (circular buffer)
-        const index_b: usize = (index_a + 1) % TABLE_SIZE;
-        
-        // 4. Read the samples from the table
-        const sample_a = table_data[index_a];
-        const sample_b = table_data[index_b];
-        
-        // 5. Linear Interpolation (X-fade between sample A and sample B)
-        // Interpolated_value = A + (B - A) * frac
-        const sample = sample_a + (sample_b - sample_a) * frac;
-        
-        // 6. Advance the phase and wrap it around
-        self.phase += self.phase_increment;
-        if (self.phase >= @as(f32, TABLE_SIZE)) {
-            // Subtract TABLE_SIZE instead of setting to 0.0 to maintain fractional precision
-            self.phase -= @as(f32, TABLE_SIZE); 
+        var sum: f32 = 0.0;
+        const count = self.unison_count;
+
+        for (0..count) |i| {
+            const detune =
+                self.unison_detune_cents *
+                (@as(f32, @floatFromInt(i)) -
+                 @as(f32, @floatFromInt(count - 1)) * 0.5);
+
+            const inc = self.phase_inc * centsToRatio(detune);
+            var p = self.unison_phases[i];
+
+            const s = self.sampleAtPhase(p, inc);
+
+            p += inc;
+            if (p >= 1.0) p -= 1.0;
+
+            self.unison_phases[i] = p;
+            sum += s;
         }
-        
-        return sample;
+
+        sum /= @as(f32, @floatFromInt(count));
+
+        // ---- MASTER PHASE ADVANCE ----
+        self.phase += self.phase_inc;
+
+        var wrapped = false;
+        if (self.phase >= 1.0) {
+            self.phase -= 1.0;
+            wrapped = true;
+        }
+
+        // ---- HARD SYNC ----
+        if (wrapped) {
+            if (self.sync_slave) |slave| {
+                slave.reset();
+            }
+        }
+
+        return sum;
+    }
+
+    /// -------------------------------------------------------
+    /// INTERNAL
+    /// -------------------------------------------------------
+
+    fn sampleAtPhase(self: *Oscillator, phase: f32, phase_inc: f32) f32 {
+        switch (self.waveform) {
+            .sine => {
+                const idx = @as(usize, @intFromFloat(phase * TABLE_SIZE)) % TABLE_SIZE;
+                return self.tables.sine[idx];
+            },
+            .tri => {
+                const idx = @as(usize, @intFromFloat(phase * TABLE_SIZE)) % TABLE_SIZE;
+                return self.tables.tri[idx];
+            },
+            .saw => return tables_mod.sawPolyBLEP(phase, phase_inc),
+            .square => return tables_mod.squarePolyBLEP(phase, phase_inc),
+        }
     }
 };
 
+/// ===========================================================
+/// UTILS
+/// ===========================================================
+
+inline fn centsToRatio(cents: f32) f32 {
+    return std.math.exp2(cents / 1200.0);
+}
