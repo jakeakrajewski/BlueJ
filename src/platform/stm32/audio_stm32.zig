@@ -1,5 +1,5 @@
 pub fn init() !void { return; }
-pub fn start() void { return; }
+pub fn start() !void { return; }
 pub fn stop() void { return; }
 pub fn deinit() void { return; }
 

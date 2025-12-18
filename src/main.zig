@@ -26,6 +26,6 @@ pub const AudioBackend = blk: {
 pub fn main() !void {
     mem.initMemory();
     try AudioBackend.init();
-    AudioBackend.start();
+    try AudioBackend.start();
 }
 
