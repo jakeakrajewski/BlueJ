@@ -9,7 +9,6 @@ pub const ADSR = struct {
         release,
     };
 
-    // Envelope parameters (seconds / level)
     attack_time: f32 = 0.01,
     decay_time: f32 = 0.1,
     sustain_level: f32 = 0.7,
@@ -17,7 +16,6 @@ pub const ADSR = struct {
 
     sample_rate: f32 = 48_000.0,
 
-    // Runtime state
     stage: Stage = .idle,
     value: f32 = 0.0,
 
@@ -53,10 +51,6 @@ pub const ADSR = struct {
                 1.0;
     }
 
-    // ----------------
-    // GATE CONTROL
-    // ----------------
-
     pub fn noteOn(self: *ADSR) void {
         self.stage = .attack;
     }
@@ -65,10 +59,6 @@ pub const ADSR = struct {
         if (self.stage != .idle)
             self.stage = .release;
     }
-
-    // ----------------
-    // AUDIO
-    // ----------------
 
     pub fn next(self: *ADSR) f32 {
         switch (self.stage) {

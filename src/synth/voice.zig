@@ -14,12 +14,17 @@ pub const OscParams = struct {
     level: f32 = 1.0,
     detune_cents: f32 = 0.0,
     waveform: Oscillator.Waveform = .saw,
+    octave: i8 = 0,
+    semitone: i8 = 0,
 };
 
 /// Monophonic synth voice
 pub const Voice = struct {
     oscs: [MAX_OSCS]Oscillator,
     osc_params: [MAX_OSCS]OscParams,
+
+    master_volume: f32 = 0.8,
+    drive: f32 = 2.5,
 
     active: bool = false,
     base_freq: f32 = 0.0,
@@ -122,77 +127,78 @@ pub const Voice = struct {
         self.oscs[index].setWaveform(wf);
     }
 
-    // ------------------------
-    // AUDIO
-    // ------------------------
-
-    
-    
 pub fn nextSample(self: *Voice) f32 {
     if (!self.active) return 0.0;
 
-    // --- Update frequency with glide/legato ---
     if (!self.legato or self.portamento_time == 0.0) {
         self.current_freq = self.target_freq;
         self.portamento_step = 0.0;
     } else if (self.portamento_step != 0.0) {
         const delta = self.target_freq - self.current_freq;
-        if (@abs(delta) <= @abs(self.portamento_step)){
+        if (@abs(delta) <= @abs(self.portamento_step)) {
             self.current_freq = self.target_freq;
-        }
-        else{
+        } else {
             self.current_freq += self.portamento_step;
         }
     }
 
-    // --- Update oscillators ---
     self.base_freq = self.current_freq;
-    for (&self.oscs, self.osc_params) |*osc, params| {
-        for (0..osc.unison_count) |i| {
-            const freq = self.base_freq * centsToRatio(params.detune_cents + @as(f32, @floatFromInt(i)) * osc.unison_detune_cents);
-            osc.setFrequency(freq);
-            osc.setWaveform(params.waveform);
 
-            // Hard sync
-            if (osc.sync_slave) |_| {
-                if (osc.phase >= @as(f32, TABLE_SIZE)) {
-                    osc.sync_slave.?.phase = 0.0;
-                }
+    for (&self.oscs, self.osc_params) |*osc, params| {
+        const cents = pitchOffsetCents(params);
+
+        osc.setFrequency(self.base_freq * centsToRatio(cents));
+        osc.setWaveform(params.waveform);
+
+        if (osc.sync_slave) |slave| {
+            if (osc.phase >= @as(f32, TABLE_SIZE)) {
+                slave.phase = 0.0;
             }
         }
     }
 
-    // --- Envelope processing ---
     const amp = self.amp_env.next();
     const filt_env = self.filter_env.next();
+
     if (!self.amp_env.isActive()) {
         self.active = false;
         self.filter.reset();
         return 0.0;
     }
 
-    // --- Oscillator mix ---
     var mix: f32 = 0.0;
-    var norm: f32 = 0.0;
-    for (&self.oscs, self.osc_params) |*osc, params| {
-        const osc_sample = osc.nextSample();
-        mix += osc_sample * params.level;
-        norm += params.level;
-    }
-    if (norm > 0.0) mix /= norm;
+    var power: f32 = 0.0;
 
-    // --- Filter modulation with key tracking ---
-    const key_mod = self.key_tracking_amount * @as(f32, @floatFromInt(self.midi_note - 69)); // 69 = A4
-    const cutoff = self.base_cutoff + filt_env * self.filter_env_amount + key_mod;
+    for (&self.oscs, self.osc_params) |*osc, params| {
+        const s = osc.nextSample();
+        mix += s * params.level;
+        power += params.level * params.level;
+    }
+
+    if (power > 0.0) {
+        mix /= std.math.sqrt(power);
+    }
+
+    mix = std.math.tanh(mix * self.drive);
+
+    const key_mod =
+        self.key_tracking_amount *
+        @as(f32, @floatFromInt(self.midi_note - 69)); // A4 reference
+
+    const cutoff =
+        self.base_cutoff +
+        filt_env * self.filter_env_amount +
+        key_mod;
+
     self.filter.setCutoff(cutoff);
     self.filter.setResonance(self.filter_resonance);
-    const filtered = self.filter.process(mix);
 
-    return filtered * amp;
+    var filtered = self.filter.process(mix);
+
+    filtered = std.math.tanh(filtered * self.drive);
+
+    return filtered * amp * self.master_volume;
 }
-    // ------------------------
-    // INTERNAL
-    // ------------------------
 
     fn updateOscFrequencies(self: *Voice) void {
         for (&self.oscs, self.osc_params) |*osc, params| {
@@ -205,4 +211,11 @@ pub fn nextSample(self: *Voice) f32 {
 
 fn centsToRatio(cents: f32) f32 {
     return std.math.pow(f32, 2.0, cents / 1200.0);
+}
+
+fn pitchOffsetCents(params: OscParams) f32 {
+    return
+        @as(f32, @floatFromInt(params.octave)) * 1200.0 +
+        @as(f32, @floatFromInt(params.semitone)) * 100.0 +
+        params.detune_cents;
 }

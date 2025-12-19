@@ -2,10 +2,6 @@ const std = @import("std");
 
 pub const TABLE_SIZE: usize = 2048;
 
-/// ===========================================================
-/// COMPTIME SINE TABLE
-/// ===========================================================
-
 pub const sine_table: [TABLE_SIZE]f32 =  blk: {
     @setEvalBranchQuota(2048);
     var t: [TABLE_SIZE]f32 = undefined;
@@ -19,19 +15,14 @@ pub const sine_table: [TABLE_SIZE]f32 =  blk: {
     break :blk t;
 };
 
-/// ===========================================================
-/// TRIANGLE TABLE (BAND-LIMITED VIA PARTIAL SUM)
-/// ===========================================================
-
 pub const tri_table: [TABLE_SIZE]f32 =  blk: {
     @setEvalBranchQuota(2048 * 35);
     var t: [TABLE_SIZE]f32 = undefined;
     @memset(&t, 0.0);
 
-    const max_harmonics = 32; // safe up to high mids
-
+    const max_harmonics = 32; 
     for (1..max_harmonics + 1) |n| {
-        if (n % 2 == 0) continue; // odd harmonics only
+        if (n % 2 == 0) continue;         
         const nf = @as(f32, @floatFromInt(n));
         const amp = 1.0 / (nf * nf);
 
@@ -52,10 +43,6 @@ pub const tri_table: [TABLE_SIZE]f32 =  blk: {
     break :blk t;
 };
 
-/// ===========================================================
-/// PUBLIC TABLE CONTAINER
-/// ===========================================================
-
 pub const Wavetables = struct {
     sine: []const f32,
     tri: []const f32,
@@ -68,11 +55,6 @@ pub const Wavetables = struct {
     }
 };
 
-/// ===========================================================
-/// POLYBLEP HELPERS (FOR SAW & SQUARE)
-/// ===========================================================
-
-/// PolyBLEP correction function
 pub inline fn polyBLEP(t: f32, dt: f32) f32 {
     if (t < dt) {
         const x = t / dt;
@@ -85,7 +67,6 @@ pub inline fn polyBLEP(t: f32, dt: f32) f32 {
     return 0.0;
 }
 
-/// Band-limited saw
 pub inline fn sawPolyBLEP(phase: f32, phase_inc: f32) f32 {
     const t = phase;
     const dt = phase_inc;
@@ -95,7 +76,6 @@ pub inline fn sawPolyBLEP(phase: f32, phase_inc: f32) f32 {
     return v;
 }
 
-/// Band-limited square
 pub inline fn squarePolyBLEP(phase: f32, phase_inc: f32) f32 {
     const t = phase;
     const dt = phase_inc;

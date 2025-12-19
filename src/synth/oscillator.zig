@@ -5,34 +5,15 @@ const TABLE_SIZE = tables_mod.TABLE_SIZE;
 
 pub const SAMPLE_RATE: f32 = 48_000.0;
 
-/// ===========================================================
-/// OSCILLATOR
-/// ===========================================================
-
 pub const Oscillator = struct {
-    /// Normalized phase [0..1)
     phase: f32 = 0.0,
-
-    /// Phase increment per sample
     phase_inc: f32 = 0.0,
-
-    /// Base frequency (Hz)
     frequency: f32 = 440.0,
-
-    /// Wavetable references
     tables: tables_mod.Wavetables,
-
-    /// Oscillator waveform
     waveform: Waveform = .saw,
-
-    /// Hard sync
     sync_slave: ?*Oscillator = null,
-
-    /// Unison
     unison_count: u8 = 1,
     unison_detune_cents: f32 = 0.0,
-
-    /// Per-unison phases
     unison_phases: [MAX_UNISON]f32 = [_]f32{0.0} ** MAX_UNISON,
 
     pub const MAX_UNISON = 8;
@@ -44,19 +25,11 @@ pub const Oscillator = struct {
         square,
     };
 
-    /// -------------------------------------------------------
-    /// INIT
-    /// -------------------------------------------------------
-
     pub fn init(tables: tables_mod.Wavetables) Oscillator {
         return .{
             .tables = tables,
         };
     }
-
-    /// -------------------------------------------------------
-    /// CONTROL
-    /// -------------------------------------------------------
 
     pub fn reset(self: *Oscillator) void {
         self.phase = 0.0;
@@ -80,10 +53,6 @@ pub const Oscillator = struct {
     pub fn setSyncMaster(self: *Oscillator, master: ?*Oscillator) void {
         self.sync_master = master;
     }
-
-    /// -------------------------------------------------------
-    /// SAMPLE GENERATION
-    /// -------------------------------------------------------
 
     pub fn nextSample(self: *Oscillator) f32 {
         var sum: f32 = 0.0;
@@ -128,10 +97,6 @@ pub const Oscillator = struct {
         return sum;
     }
 
-    /// -------------------------------------------------------
-    /// INTERNAL
-    /// -------------------------------------------------------
-
     fn sampleAtPhase(self: *Oscillator, phase: f32, phase_inc: f32) f32 {
         switch (self.waveform) {
             .sine => {
@@ -147,10 +112,6 @@ pub const Oscillator = struct {
         }
     }
 };
-
-/// ===========================================================
-/// UTILS
-/// ===========================================================
 
 inline fn centsToRatio(cents: f32) f32 {
     return std.math.exp2(cents / 1200.0);
