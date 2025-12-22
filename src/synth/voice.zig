@@ -43,8 +43,8 @@ pub const Voice = struct {
     filter: ResonantLPF,
     filter_resonance: f32 = 0.5, // 0..0.99
 
-    base_cutoff: f32 = 800.0,
-    filter_env_amount: f32 = 2000.0,
+    base_cutoff: f32 = 200.0,
+    filter_env_amount: f32 = 6000.0,
 
 
     /// Initialize voice and internal oscillators

@@ -99,7 +99,7 @@ var audio_unit: c.AudioUnit = null;
 var frames_rendered: u64 = 0;
 const SAMPLE_RATE: f32 = 48_000.0;
 
-var ARP_RATE_HZ: f32 = 8.0;
+var ARP_RATE_HZ: f32 = 2.0;
 
 const base_freq_a2: f32 = 110.0; 
 
@@ -157,12 +157,18 @@ fn renderCallback(
     const out: [*]f32 = @ptrCast(@alignCast(buffer.mData));
 
     var i: u32 = 0;
+    var sequencer = &tui.sequencer;
+
     while (i < inNumberFrames) : (i += 1) {
 
         if (arp_sample_counter == 0) {
-            voice.noteOn(ARP_SEQUENCE[arp_step] * 2);
+            const note = sequencer.freq_steps[arp_step].load(.acquire);
+            if (note > -1.0) {
+                voice.noteOn(note);
+            } else if (note == -1.0) voice.noteOff();
+
             arp_step += 1;
-            if (arp_step >= ARP_SEQUENCE.len) arp_step = 0;
+            if (@as(f32, @floatFromInt(arp_step)) >= shared_params.sequencer_len.load(.acquire)) arp_step = 0;
         }
 
 
