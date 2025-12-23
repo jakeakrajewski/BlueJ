@@ -34,7 +34,6 @@ pub const Voice = struct {
     target_freq: f32 = 0.0,
     portamento_time: f32 = 0.0, // seconds
     portamento_step: f32 = 0.0,
-    legato: bool,
     key_tracking_amount: f32,  // e.g., 0.0 .. 1.0
     midi_note: u8,             // for key tracking
 
@@ -62,7 +61,6 @@ pub const Voice = struct {
             .filter = LadderLPF.init(sample_rate),
             // .filter = ResonantLPF.init(sample_rate),
 
-            .legato = false,
             .key_tracking_amount = 0.0,
             .midi_note = 69, //A4
         };
@@ -133,7 +131,7 @@ pub const Voice = struct {
 pub fn nextSample(self: *Voice) f32 {
     if (!self.active) return 0.0;
 
-    if (!self.legato or self.portamento_time == 0.0) {
+    if (self.portamento_time == 0.0) {
         self.current_freq = self.target_freq;
         self.portamento_step = 0.0;
     } else if (self.portamento_step != 0.0) {
