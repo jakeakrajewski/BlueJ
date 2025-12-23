@@ -5,6 +5,7 @@ const Wavetables = @import("tables.zig").Wavetables;
 const ADSR = @import("adsr.zig").ADSR;
 const LowPassFilter = @import("filter.zig").LowPassFilter;
 const ResonantLPF = @import("filter.zig").ResonantLPF;
+const LadderLPF = @import("filter.zig").LadderLPF;
 
 pub const MAX_OSCS: usize = 3;
 const TABLE_SIZE: usize = 2048;
@@ -40,7 +41,8 @@ pub const Voice = struct {
     amp_env: ADSR,
     filter_env: ADSR,
 
-    filter: ResonantLPF,
+    filter: LadderLPF,
+    // filter: ResonantLPF,
     filter_resonance: f32 = 0.5, // 0..0.99
 
     base_cutoff: f32 = 200.0,
@@ -57,7 +59,8 @@ pub const Voice = struct {
 
             .amp_env = ADSR.init(sample_rate),
             .filter_env = ADSR.init(sample_rate),
-            .filter = ResonantLPF.init(sample_rate),
+            .filter = LadderLPF.init(sample_rate),
+            // .filter = ResonantLPF.init(sample_rate),
 
             .legato = false,
             .key_tracking_amount = 0.0,
