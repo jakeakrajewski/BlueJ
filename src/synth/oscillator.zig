@@ -11,7 +11,8 @@ pub const Oscillator = struct {
     frequency: f32 = 440.0,
     tables: tables_mod.Wavetables,
     waveform: Waveform = .saw,
-    sync_slave: ?*Oscillator = null,
+    sync_slave1: ?*Oscillator = null,
+    sync_slave2: ?*Oscillator = null,
     unison_count: u8 = 1,
     unison_detune_cents: f32 = 0.0,
     unison_phases: [MAX_UNISON]f32 = [_]f32{0.0} ** MAX_UNISON,
@@ -91,7 +92,10 @@ pub const Oscillator = struct {
 
         // ---- HARD SYNC ----
         if (wrapped) {
-            if (self.sync_slave) |slave| {
+            if (self.sync_slave1) |slave| {
+                slave.reset();
+            }
+            if (self.sync_slave2) |slave| {
                 slave.reset();
             }
         }

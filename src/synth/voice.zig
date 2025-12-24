@@ -104,6 +104,9 @@ pub const Voice = struct {
             params.* = .{};
         }
 
+        v.oscs[0].sync_slave1 = &v.oscs[1];
+        v.oscs[0].sync_slave2 = &v.oscs[2];
+
         return v;
     }
 
@@ -208,7 +211,12 @@ pub fn nextSample(self: *Voice) [2]f32 {
         osc.setFrequency(self.base_freq * centsToRatio(cents));
         osc.setWaveform(params.waveform);
 
-        if (osc.sync_slave) |slave| {
+        if (osc.sync_slave1) |slave| {
+            if (osc.phase >= @as(f32, TABLE_SIZE)) {
+                slave.phase = 0.0;
+            }
+        }
+        if (osc.sync_slave2) |slave| {
             if (osc.phase >= @as(f32, TABLE_SIZE)) {
                 slave.phase = 0.0;
             }
