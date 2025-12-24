@@ -31,10 +31,15 @@ pub const Oscillator = struct {
         };
     }
 
+  
     pub fn reset(self: *Oscillator) void {
         self.phase = 0.0;
-        for (&self.unison_phases) |*p| p.* = 0.0;
+        // Spread initial phases across unison voices
+        for (&self.unison_phases, 0..) |*p, i| {
+            p.* = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(MAX_UNISON));
+        }
     }
+
 
     pub fn setFrequency(self: *Oscillator, freq: f32) void {
         self.frequency = freq;
@@ -57,26 +62,23 @@ pub const Oscillator = struct {
     pub fn nextSample(self: *Oscillator) f32 {
         var sum: f32 = 0.0;
         const count = self.unison_count;
-
+        
         for (0..count) |i| {
             const detune =
                 self.unison_detune_cents *
                 (@as(f32, @floatFromInt(i)) -
                  @as(f32, @floatFromInt(count - 1)) * 0.5);
-
             const inc = self.phase_inc * centsToRatio(detune);
             var p = self.unison_phases[i];
-
             const s = self.sampleAtPhase(p, inc);
-
             p += inc;
             if (p >= 1.0) p -= 1.0;
-
             self.unison_phases[i] = p;
             sum += s;
         }
-
-        sum /= @as(f32, @floatFromInt(count));
+        
+        // Power normalization for perceptually consistent loudness
+        sum /= @sqrt(@as(f32, @floatFromInt(count)));
 
         // ---- MASTER PHASE ADVANCE ----
         self.phase += self.phase_inc;

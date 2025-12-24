@@ -19,11 +19,35 @@ pub const OscParams = struct {
     semitone: i8 = 0,
 };
 
+
+pub const LfoRouting = struct {
+    cutoff: f32 = 0.0,   // Hz depth
+    resonance: f32 = 0.0, // 0..1
+    pitch: f32 = 0.0,    // semitones
+    amp: f32 = 0.0,      // bipolar tremolo
+    volume: f32 = 0.0,   // post-amp volume modulation
+};
+
+
+pub const LFO = struct {
+    osc: Oscillator,
+    freq_hz: f32 = 1.0,
+    depth: f32 = 1.0,
+    routing: LfoRouting,
+    value: f32 = 0.0, // cached output (-1..1)
+};
+
 /// Monophonic synth voice
 pub const Voice = struct {
     oscs: [MAX_OSCS]Oscillator,
     osc_params: [MAX_OSCS]OscParams,
 
+    lfo1: LFO,
+    lfo2: LFO,
+
+    lfo_counter: u32 = 0,
+    lfo_update_rate: u32 = 32, // control-rate (samples)
+    
     master_volume: f32 = 0.8,
     drive: f32 = 2.5,
 
@@ -47,7 +71,6 @@ pub const Voice = struct {
     base_cutoff: f32 = 200.0,
     filter_env_amount: f32 = 6000.0,
 
-
     /// Initialize voice and internal oscillators
 
 
@@ -63,6 +86,17 @@ pub const Voice = struct {
 
             .key_tracking_amount = 0.0,
             .midi_note = 69, //A4
+            //
+
+            .lfo1 = .{
+                .osc = Oscillator.init(tables),
+                .routing = .{}
+            },
+            .lfo2 = .{
+                .osc = Oscillator.init(tables),
+                .routing = .{}
+            },
+
         };
 
         for (&v.oscs, &v.osc_params) |*osc, *params| {
@@ -128,8 +162,21 @@ pub const Voice = struct {
         self.oscs[index].setWaveform(wf);
     }
 
-pub fn nextSample(self: *Voice) f32 {
-    if (!self.active) return 0.0;
+pub fn nextSample(self: *Voice) [2]f32 {
+    if (!self.active) return [2]f32{0.0, 0.0 };
+
+    self.lfo_counter += 1;
+
+    if (self.lfo_counter >= self.lfo_update_rate) {
+        self.lfo_counter = 0;
+
+        self.lfo1.osc.setFrequency(self.lfo1.freq_hz);
+        self.lfo2.osc.setFrequency(self.lfo2.freq_hz);
+
+        // Ensure bipolar output
+        self.lfo1.value = self.lfo1.osc.nextSample() * 2.0 - 1.0;
+        self.lfo2.value = self.lfo2.osc.nextSample() * 2.0 - 1.0;
+    }
 
     if (self.portamento_time == 0.0) {
         self.current_freq = self.target_freq;
@@ -143,7 +190,17 @@ pub fn nextSample(self: *Voice) f32 {
         }
     }
 
-    self.base_freq = self.current_freq;
+
+    var pitch_mod_semitones: f32 = 0.0;
+
+    pitch_mod_semitones += self.lfo1.value * self.lfo1.routing.pitch * self.lfo1.depth;
+    pitch_mod_semitones += self.lfo2.value * self.lfo2.routing.pitch * self.lfo2.depth;
+
+    const pitch_ratio =
+        std.math.pow(f32, 2.0, pitch_mod_semitones / 12.0);
+
+    self.base_freq = self.current_freq * pitch_ratio;
+
 
     for (&self.oscs, self.osc_params) |*osc, params| {
         const cents = pitchOffsetCents(params);
@@ -164,7 +221,7 @@ pub fn nextSample(self: *Voice) f32 {
     if (!self.amp_env.isActive()) {
         self.active = false;
         self.filter.reset();
-        return 0.0;
+        return [2]f32{0.0, 0.0 };
     }
 
     var mix: f32 = 0.0;
@@ -186,19 +243,84 @@ pub fn nextSample(self: *Voice) f32 {
         self.key_tracking_amount *
         @as(f32, @floatFromInt(self.midi_note - 69)); // A4 reference
 
-    const cutoff =
-        self.base_cutoff +
-        filt_env * self.filter_env_amount +
-        key_mod;
+
+    var cutoff = self.base_cutoff;
+
+    cutoff += filt_env * self.filter_env_amount;
+    cutoff += key_mod;
+    cutoff += self.lfo1.value * self.lfo1.routing.cutoff * self.lfo1.depth * 8000.0;
+    cutoff += self.lfo2.value * self.lfo2.routing.cutoff * self.lfo2.depth * 8000.0;
+    cutoff = std.math.clamp(cutoff, 20.0, 20000.0);
+
 
     self.filter.setCutoff(cutoff);
-    self.filter.setResonance(self.filter_resonance);
+ 
+    var resonance = self.filter_resonance;
+
+    resonance += self.lfo1.value * self.lfo1.routing.resonance * self.lfo1.depth;
+    resonance += self.lfo2.value * self.lfo2.routing.resonance * self.lfo2.depth;
+
+    resonance = std.math.clamp(resonance, 0.0, 0.99);
+    self.filter.setResonance(resonance);
+
 
     var filtered = self.filter.process(mix);
 
     filtered = std.math.tanh(filtered * self.drive);
 
-    return filtered * amp * self.master_volume;
+
+    // --- AMP MOD (musical tremolo) ---
+    var amp_mod: f32 = 1.0;
+
+    // Square wave tremolo should be unipolar
+    if (self.lfo1.routing.amp > 0.0) {
+        const t = bipolarToUnipolar(self.lfo1.value);
+        amp_mod *= std.math.lerp(
+            1.0,
+            t,
+            self.lfo1.routing.amp * self.lfo1.depth,
+        );
+    }
+
+    if (self.lfo2.routing.amp > 0.0) {
+        const t = bipolarToUnipolar(self.lfo2.value);
+        amp_mod *= std.math.lerp(
+            1.0,
+            t,
+            self.lfo2.routing.amp * self.lfo2.depth,
+        );
+    }
+
+    amp_mod = std.math.clamp(amp_mod, 0.0, 1.0);
+
+    // --- VOLUME MOD (hard chop / gate) ---
+    var volume_mod: f32 = 1.0;
+
+    if (self.lfo1.routing.volume > 0.0) {
+        volume_mod *= std.math.lerp(
+            1.0,
+            hardTremolo(self.lfo1.value),
+            self.lfo1.routing.volume * self.lfo1.depth,
+        );
+    }
+
+    if (self.lfo2.routing.volume > 0.0) {
+        volume_mod *= std.math.lerp(
+            1.0,
+            hardTremolo(self.lfo2.value),
+            self.lfo2.routing.volume * self.lfo2.depth,
+        );
+    }
+
+    const mono_out =
+        filtered *
+        amp *
+        amp_mod *
+        self.master_volume *
+        volume_mod; 
+        const stereo_out = [2]f32{mono_out, mono_out};
+
+    return stereo_out;
 }
 
     fn updateOscFrequencies(self: *Voice) void {
@@ -220,3 +342,14 @@ fn pitchOffsetCents(params: OscParams) f32 {
         @as(f32, @floatFromInt(params.semitone)) * 100.0 +
         params.detune_cents;
 }
+
+fn bipolarToUnipolar(x: f32) f32 {
+    // -1..1 → 0..1
+    return 0.5 * (x + 1.0);
+}
+
+fn hardTremolo(x: f32) f32 {
+    // square-wave style gating
+    return if (x > 0.0) 1.0 else 0.0;
+}
+

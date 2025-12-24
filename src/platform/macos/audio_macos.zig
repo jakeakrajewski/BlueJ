@@ -61,6 +61,10 @@ pub fn init() !void {
     voice.setOscLevel(0, 1.0);
     voice.setOscLevel(1, 0.7);
     voice.setOscLevel(2, 0.7);
+
+    voice.lfo1.osc.setWaveform(.sine);
+    voice.lfo2.osc.setWaveform(.sine);
+
 }
 
 pub fn start() !void {
@@ -111,34 +115,19 @@ fn semitonesToFreq(base: f32, semitones: i32) f32 {
     return base * std.math.pow(f32, 2.0, @as(f32, @floatFromInt(semitones)) / 12.0);
 }
 
-const ARP_SEQUENCE: [24]f32 = [_]f32{
-    36.78, // D1
-    43.654, //F1
-    55.00, // A1
-    69.296, // C#2     
-    73.461, // D2 
-    82.401, // E2 
-    87.307, // F#2,
-    82.401, // E2 
-    73.461, // D2 
-    48.999, //G1
-    58.270, // Bb2
-    55.00, // A2
-    55.00, // A2
-    73.461, // D2 
-    55.00, // A2
-    48.999, //G1
-    55.00, // A2
-    58.270, // Bb2
-    43.654, //F1
-    55.00, // A2
-    43.654, //F1
-    41.203, //E1
-    36.78, // D1
-    41.203, //E1
+inline fn lfoSample(lfo: *synth.LFO) f32 {
+    // LFO oscillator already outputs -1..1
+    return lfo.osc.nextSample();
+}
 
-};
-
+inline fn applyLfo(
+    base: f32,
+    lfo_val: f32,
+    depth: f32,
+    amount: f32,
+) f32 {
+    return base + (lfo_val * depth * amount);
+}
 
 fn renderCallback(
     inRefCon: ?*anyopaque,
@@ -160,6 +149,8 @@ fn renderCallback(
     var sequencer = &tui.sequencer;
 
     while (i < inNumberFrames) : (i += 1) {
+        const lfo1 = lfoSample(&voice.lfo1);
+        const lfo2 = lfoSample(&voice.lfo2);
 
         if (arp_sample_counter == 0) {
             const note = sequencer.freq_steps[arp_step].load(.acquire);
@@ -175,14 +166,65 @@ fn renderCallback(
         ARP_RATE_HZ =
             shared_params.sequencer_tempo.load(.acquire);
 
-        voice.base_cutoff =
+
+        const base_cutoff =
             shared_params.cutoff.load(.acquire);
 
-        voice.filter_resonance =
+        voice.base_cutoff =
+            applyLfo(
+                applyLfo(
+                    base_cutoff,
+                    lfo1,
+                    voice.lfo1.depth,
+                    shared_params.lfo1_cutoff.load(.acquire),
+                ),
+                lfo2,
+                voice.lfo2.depth,
+                shared_params.lfo2_cutoff.load(.acquire),
+            );
+
+        const base_res =
             shared_params.resonance.load(.acquire);
 
-        voice.master_volume =
+        voice.filter_resonance =
+            std.math.clamp(
+                applyLfo(
+                    applyLfo(
+                        base_res,
+                        lfo1,
+                        voice.lfo1.depth,
+                        shared_params.lfo1_resonance.load(.acquire),
+                    ),
+                    lfo2,
+                    voice.lfo2.depth,
+                    shared_params.lfo2_resonance.load(.acquire),
+                ),
+                0.0,
+                0.99,
+            );
+
+        const base_vol =
             shared_params.master_volume.load(.acquire);
+
+        // Smooth tremolo (sine / triangle)
+        const amp_lfo =
+            (lfo1 * shared_params.lfo1_amp.load(.acquire) +
+             lfo2 * shared_params.lfo2_amp.load(.acquire));
+
+        // Hard gate (square wave works best)
+        const vol_lfo =
+            (lfo1 * shared_params.lfo1_volume.load(.acquire) +
+             lfo2 * shared_params.lfo2_volume.load(.acquire));
+
+        voice.master_volume =
+            std.math.clamp(
+                base_vol *
+                (1.0 + amp_lfo * 0.5) *
+                (1.0 + vol_lfo),
+                0.0,
+                1.5,
+            );
+
 
         voice.drive =
             shared_params.drive.load(.acquire);
@@ -223,6 +265,32 @@ fn renderCallback(
 
         voice.key_tracking_amount =
             shared_params.key_tracking.load(.acquire);
+
+        // === LFO 1 params ===
+        voice.lfo1.freq_hz =
+            shared_params.lfo1_rate.load(.acquire);
+        voice.lfo1.depth =
+            shared_params.lfo1_depth.load(.acquire);
+        voice.lfo1.osc.setFrequency(voice.lfo1.freq_hz);
+
+        voice.lfo1.osc.setWaveform(
+            @enumFromInt(@as(usize, @intFromFloat(
+                shared_params.lfo1_wave.load(.acquire) - 1
+            )))
+        );
+
+        // === LFO 2 params ===
+        voice.lfo2.freq_hz =
+            shared_params.lfo2_rate.load(.acquire);
+        voice.lfo2.depth =
+            shared_params.lfo2_depth.load(.acquire);
+        voice.lfo2.osc.setFrequency(voice.lfo2.freq_hz);
+
+        voice.lfo2.osc.setWaveform(
+            @enumFromInt(@as(usize, @intFromFloat(
+                shared_params.lfo2_wave.load(.acquire) - 1
+            )))
+        );
 
         // === Oscillator parameters ===
 
@@ -307,17 +375,25 @@ fn renderCallback(
             @intFromFloat(
                 shared_params.osc3_unison_count.load(.acquire));
 
-
+        // voice.delay.delay_time_ms =
+        //         shared_params.delay_time_ms.load(.acquire);
+        //
+        // voice.delay.feedback =
+        //         shared_params.delay_feedback.load(.acquire);
+        //
+        // voice.delay.mix =
+        //         shared_params.delay_mix.load(.acquire);
+        //
         arp_sample_counter += 1;
         if (arp_sample_counter >= @as(u32,@intFromFloat(SAMPLE_RATE / ARP_RATE_HZ))) {
             arp_sample_counter = 0;
         }
 
-        const s = voice.nextSample();
+        const stereo = voice.nextSample();
 
         // mono → stereo
-        out[i * 2 + 0] = s;
-        out[i * 2 + 1] = s;
+        out[i * 2 + 0] = stereo[0];
+        out[i * 2 + 1] = stereo[1];
     }
 
     return c.noErr;

@@ -6,6 +6,7 @@ pub const Oscillator = osc.Oscillator;
 pub const Wavetables = tables.Wavetables;
 pub const Voice = voice.Voice;
 pub const ADSR = adsr.ADSR;
+pub const LFO = voice.LFO;
 pub const initTables = tables.initTables;
 
 pub const Synth = @This();

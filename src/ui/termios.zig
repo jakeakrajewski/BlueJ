@@ -37,8 +37,10 @@ pub const Sequencer = struct {
 
         self.midi_steps[index].store(midi_note, .release);
 
-        if (midi_note < 0.0) {
-            self.freq_steps[index].store(-1.0, .release);
+        if (midi_note == -2.0) {
+            self.freq_steps[index].store(-2.0, .release);  // Preserve hold
+        } else if (midi_note < 0.0) {
+            self.freq_steps[index].store(-1.0, .release);  // Rest
         } else {
             const freq = midiNoteToFreq(@intFromFloat(midi_note));
             self.freq_steps[index].store(freq, .release);
@@ -83,6 +85,24 @@ pub const SharedParams = struct {
     portamento: std.atomic.Value(f32),
     key_tracking: std.atomic.Value(f32),
 
+    // LFO 1
+    lfo1_rate: std.atomic.Value(f32),
+    lfo1_wave: std.atomic.Value(f32),
+    lfo1_depth: std.atomic.Value(f32),
+    lfo1_cutoff: std.atomic.Value(f32),
+    lfo1_resonance: std.atomic.Value(f32),
+    lfo1_amp: std.atomic.Value(f32),
+    lfo1_volume: std.atomic.Value(f32),
+
+    // LFO 2
+    lfo2_rate: std.atomic.Value(f32),
+    lfo2_wave: std.atomic.Value(f32),
+    lfo2_depth: std.atomic.Value(f32),
+    lfo2_cutoff: std.atomic.Value(f32),
+    lfo2_resonance: std.atomic.Value(f32),
+    lfo2_amp: std.atomic.Value(f32),
+    lfo2_volume: std.atomic.Value(f32),
+
     osc1_wave: std.atomic.Value(f32),
     osc1_level: std.atomic.Value(f32),
     osc1_octave: std.atomic.Value(f32),
@@ -107,6 +127,10 @@ pub const SharedParams = struct {
     sequencer_index: std.atomic.Value(f32),
     sequencer_len: std.atomic.Value(f32),
 
+    // delay_time_ms: std.atomic.Value(f32),  
+    // delay_feedback: std.atomic.Value(f32),       
+    // delay_mix: std.atomic.Value(f32),            
+    
     pub fn init() SharedParams {
         return .{
             .sequencer_tempo = .init(2.0),
@@ -128,6 +152,24 @@ pub const SharedParams = struct {
 
             .portamento = .init(0.0),
             .key_tracking = .init(1.0),
+
+            // LFO 1
+            .lfo1_rate = .init(2.0),
+            .lfo1_wave = .init(1.0), // 1=sine, 2=tri, 3=saw, 4=square
+            .lfo1_depth = .init(1.0),
+            .lfo1_cutoff = .init(0.0),
+            .lfo1_resonance = .init(0.0),
+            .lfo1_amp = .init(0.0),
+            .lfo1_volume = .init(0.0),
+
+            // LFO 2
+            .lfo2_rate = .init(0.5),
+            .lfo2_wave = .init(1.0),
+            .lfo2_depth = .init(1.0),
+            .lfo2_cutoff = .init(0.0),
+            .lfo2_resonance = .init(0.0),
+            .lfo2_amp = .init(0.0),
+            .lfo2_volume = .init(0.0),
 
             .osc1_wave = .init(1.0),
             .osc1_level = .init(1.0),
@@ -151,6 +193,10 @@ pub const SharedParams = struct {
             .osc3_unison_count = .init(1.0),
             .sequencer_index = .init(0.0),
             .sequencer_len = .init(8.0),
+
+            // .delay_time_ms = .init(250.0),
+            // .delay_feedback = .init(0.4),
+            // .delay_mix = .init(0.3),
         };
     }
 
@@ -233,9 +279,17 @@ fn draw(params: []Param, cursor: usize, writer: *std.io.Writer) !void {
     
     for (params, 0..) |p, i| {
         if (i == cursor) {
-            _ = writer.print("> {s:<10} {d:.3}\r\n", .{ p.name, p.get() }) catch {};
+            if (std.mem.endsWith(u8, p.name, "Wave")) {
+                _ = writer.print("> {s:<10} {s}\r\n", .{ p.name, waveName(p.get()) }) catch {};
+            } else {
+                _ = writer.print("> {s:<10} {d:.3}\r\n", .{ p.name, p.get() }) catch {};
+            }
         } else {
-            _ = writer.print("  {s:<10} {d:.3}\r\n", .{ p.name, p.get() }) catch {};
+            if (std.mem.endsWith(u8, p.name, "Wave")) {
+                _ = writer.print("  {s:<10} {s}\r\n", .{ p.name, waveName(p.get()) }) catch {};
+            } else {
+                _ = writer.print("  {s:<10} {d:.3}\r\n", .{ p.name, p.get() }) catch {};
+            }
         }
     }
     _ = writer.print("\r\n", .{  }) catch {};
@@ -286,6 +340,24 @@ pub fn run(shared: *SharedParams) !void {
         .{ .name = "Portamento", .value = &shared.portamento, .min = 0.0, .max = 1.0, .step = 0.01 },
         .{ .name = "Key Track", .value = &shared.key_tracking, .min = 0.0, .max = 1.0, .step = 0.05 },
 
+        // -------- LFO 1 --------
+        .{ .name = "LFO1 Rate", .value = &shared.lfo1_rate, .min = 0.05, .max = 20.0, .step = 0.05 },
+        .{ .name = "LFO1 Wave", .value = &shared.lfo1_wave, .min = 1.0, .max = 4.0, .step = 1.0 },
+        .{ .name = "LFO1 Depth", .value = &shared.lfo1_depth, .min = 0.0, .max = 1.0, .step = 0.05 },
+        .{ .name = "LFO1 → Cut", .value = &shared.lfo1_cutoff, .min = 0.0, .max = 1.0, .step = 0.05 },
+        .{ .name = "LFO1 → Res", .value = &shared.lfo1_resonance, .min = 0.0, .max = 1.0, .step = 0.05 },
+        .{ .name = "LFO1 → Amp", .value = &shared.lfo1_amp, .min = 0.0, .max = 1.0, .step = 0.05 },
+        .{ .name = "LFO1 → Vol", .value = &shared.lfo1_volume, .min = 0.0, .max = 1.0, .step = 0.05 },
+
+        // -------- LFO 2 --------
+        .{ .name = "LFO2 Rate", .value = &shared.lfo2_rate, .min = 0.05, .max = 20.0, .step = 0.05 },
+        .{ .name = "LFO2 Wave", .value = &shared.lfo2_wave, .min = 1.0, .max = 4.0, .step = 1.0 },
+        .{ .name = "LFO2 Depth", .value = &shared.lfo2_depth, .min = 0.0, .max = 1.0, .step = 0.05 },
+        .{ .name = "LFO2 → Cut", .value = &shared.lfo2_cutoff, .min = 0.0, .max = 1.0, .step = 0.05 },
+        .{ .name = "LFO2 → Res", .value = &shared.lfo2_resonance, .min = 0.0, .max = 1.0, .step = 0.05 },
+        .{ .name = "LFO2 → Amp", .value = &shared.lfo2_amp, .min = 0.0, .max = 1.0, .step = 0.05 },
+        .{ .name = "LFO2 → Vol", .value = &shared.lfo2_volume, .min = 0.0, .max = 1.0, .step = 0.05 },
+
         // Osc 1
         .{ .name = "Osc1 Wave", .value = &shared.osc1_wave, .min = 1.0, .max = 4.0, .step = 1.0 },
         .{ .name = "Osc1 Level", .value = &shared.osc1_level, .min = 0.0, .max = 1.0, .step = 0.05 },
@@ -312,6 +384,10 @@ pub fn run(shared: *SharedParams) !void {
 
         .{ .name = "Sequencer Position", .value = &shared.sequencer_index, .min = 1.0, .max = 32.0, .step = 1.0 },
         .{ .name = "Sequence Length", .value = &shared.sequencer_len, .min = 0.0, .max = 32.0, .step = 1.0 },
+
+        // .{ .name = "Delay Time ms", .value = &shared.delay_time_ms, .min = 0.0, .max = 1000.0, .step = 20.0 },
+        // .{ .name = "Delay Feedback", .value = &shared.delay_feedback, .min = 0.0, .max = 0.95, .step = 0.05 },
+        // .{ .name = "Delay Mix", .value = &shared.delay_mix, .min = 0.0, .max = 1.0, .step = 0.05 },
     };
 
     sequencer = Sequencer.init();
@@ -324,7 +400,30 @@ pub fn run(shared: *SharedParams) !void {
         try draw(&params, cursor, &writer);
 
         const n = try std.posix.read(stdin_fd, &buf);
-        if (n == 1 and buf[0] == 'q') break;
+
+        // Single-key commands
+        if (n == 1) {
+            switch (buf[0]) {
+                'q' => break,
+
+                'r' => { // rest
+                    if (cursor >= params.len) {
+                        const step = cursor - params.len;
+                        sequencer.setNote(step, -1);
+                    }
+                },
+
+                'h' => { // hold
+                    if (cursor >= params.len) {
+                        const step = cursor - params.len;
+                        sequencer.setNote(step, -2);
+                    }
+                },
+
+                else => {},
+            }
+        }
+
 
         // Normal arrow keys
         if (n == 3 and buf[0] == 0x1b and buf[1] == '[') {
@@ -348,7 +447,7 @@ pub fn run(shared: *SharedParams) !void {
                     } else {
                         const step = cursor - params.len;
                         const cur = sequencer.midi_steps[step].load(.acquire);
-                        if (cur > -1) {
+                        if (cur > -2) {
                             sequencer.setNote(step, cur - 1);
                         }
                     }
@@ -394,7 +493,9 @@ const note_names = [_][]const u8{
 
 fn midiToName(note: i8, buf: []u8) []u8 {
     var rest: [3]u8 = [3]u8{ ' ', ' ', ' '};
-    if (note < 0) return &rest;
+    var hold: [3]u8 = [3]u8{ '-', '-', '-'};
+    if (note == -1) return &rest;
+    if (note == -2) return &hold;
     const octave = (@divFloor(note, 12)) + 1;
     const name = note_names[@intCast(@rem(note, 12))];
     return std.fmt.bufPrint(buf, "{s}{d}", .{ name, octave }) catch &rest;
@@ -432,4 +533,14 @@ fn midiToName(note: i8, buf: []u8) []u8 {
 //
 //     return buf[0..5];
 // }
+
+fn waveName(v: f32) []const u8 {
+    return switch (@as(usize, @intFromFloat(v))) {
+        1 => "SIN",
+        2 => "TRI",
+        3 => "SAW",
+        4 => "SQR",
+        else => "???",
+    };
+}
 
