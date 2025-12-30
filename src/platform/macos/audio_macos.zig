@@ -4,14 +4,85 @@ const Wavetables = synth.Wavetables;
 const Oscillator = synth.Oscillator;
 const Waveform = Oscillator.Waveform;
 const Voice = synth.Voice;
+const MidiParser = @import("../../midi/midi.zig").MidiParser;
+const MidiEvent = @import("../../midi/midi.zig").MidiEvent;
 const c = @cImport({
     @cInclude("CoreFoundation/CoreFoundation.h");
     @cInclude("CoreAudio/CoreAudio.h");
     @cInclude("AudioToolbox/AudioToolbox.h");
     @cInclude("AudioUnit/AudioUnit.h");
+    @cInclude("CoreMIDI/CoreMIDI.h");
 });
+
 const tui = @import("../../ui/termios.zig");
 const waveform_count: u8 = @intCast(@typeInfo(Waveform).@"enum".fields.len);
+var midi_client: c.MIDIClientRef = 0;
+var midi_input_port: c.MIDIPortRef = 0;
+
+var parser = MidiParser{};
+
+fn handleMidiByte(b: u8) void {
+    if (parser.parseByte(b)) |event| {
+        handleMidiEvent(event);
+    }
+}
+
+fn cfString(str: []const u8) c.CFStringRef {
+    return c.CFStringCreateWithCString(
+        null,
+        str.ptr,
+        c.kCFStringEncodingUTF8,
+    );
+}
+
+var active_note: ?u8 = null;
+
+fn handleMidiEvent(ev: MidiEvent) void {
+    switch (ev.event_type) {
+
+        .note_on => {
+            const freq = midiNoteToFreq(ev.note);
+            active_note = ev.note;
+            voice.noteOn(freq, ev.note);
+        },
+
+        .note_off => {
+            voice.noteOff(ev.note);
+        },
+
+
+        .cc => switch (ev.controller) {
+            1 => voice.lfo1.depth = @as(f32, @floatFromInt(ev.value)) / 127.0, // mod wheel
+            74 => voice.base_cutoff = 200.0 + @as(f32, @floatFromInt(ev.value)) * 80.0,
+            else => {},
+        },
+
+        .pitch_bend => {
+            // const bend = @as(f32, @floatFromInt(ev.pitch_bend)) / 8192.0;
+            // voice.pitch_bend = bend * 2.0; // ±2 semitones
+        },
+
+        else => {},
+    }
+}
+
+
+fn handleMidiPacket(packet: *const c.MIDIPacket) void {
+    const data = packet.data[0..packet.length];
+
+    for (data) |b| {
+        handleMidiByte(b);
+    }
+}
+
+
+fn midiNoteToFreq(note: u8) f32 {
+    return 440.0 * std.math.pow(
+        f32,
+        2.0,
+        (@as(f32, @floatFromInt(note)) - 69.0) / 12.0,
+    );
+}
 
 var tables: Wavetables = undefined;
 // var osc: Oscillator = undefined;
@@ -24,54 +95,100 @@ pub fn init() !void {
     // osc.setFrequency(440.0);
     // osc.setWaveform(.square);
 
-    voice = Voice.init(tables, 48000.0);
+    voice = try Voice.init(tables, 48000.0);
 
-    // Filter envelope
-    voice.filter_env.attack_time = 0.05;
-    voice.filter_env.decay_time = 0.2;
-    voice.filter_env.sustain_level = 0.2;
-    voice.filter_env.release_time = 0.3;
-    voice.filter_env.recalc();
 
-    // Filter response
-    voice.base_cutoff = 400.0;
-    voice.filter_env_amount = 3000.0;
 
-    // Amp envelope
-    voice.amp_env.attack_time = 0.005;
-    voice.amp_env.decay_time = 0.201;
-    voice.amp_env.sustain_level = 0.02;
-    voice.amp_env.release_time = 0.22;
-    voice.amp_env.recalc();
+}
 
-    voice.portamento_time = 0.00; // 50 ms glide
-    // voice.noteOn(440.0); // A4
-    // // play
-    // voice.noteOn(660.0); // E5, glides smoothly from 440 → 660
+export fn midiReadCallback(
+    pkt_list: [*c]const c.MIDIPacketList,
+    readProcRefCon: ?*anyopaque,
+    srcConnRefCon: ?*anyopaque,
+) callconv(.c) void {
+    _ = readProcRefCon;
+    _ = srcConnRefCon;
 
-    voice.noteOn(110.0); // A2
+    if (pkt_list == null) return;
+    
+    const raw_bytes: [*]const u8 = @ptrCast(pkt_list);
+    const num_packets = @as(u32, raw_bytes[0]) |
+                       (@as(u32, raw_bytes[1]) << 8) |
+                       (@as(u32, raw_bytes[2]) << 16) |
+                       (@as(u32, raw_bytes[3]) << 24);
+    
+    
+    var offset: usize = 4;
+    
+    var i: u32 = 0;
+    while (i < num_packets) : (i += 1) {
+        const length = @as(u16, raw_bytes[offset + 8]) |
+                      (@as(u16, raw_bytes[offset + 9]) << 8);
+        
+        
+        if (length > 0 and length <= 256) {
+            const data_offset = offset + 10;
+            const data = raw_bytes[data_offset..][0..length];
+            
+            for (data) |b| {
+                handleMidiByte(b);
+            }
+        }
+        
+        const packet_size = 10 + length;
+        const aligned_size = (packet_size + 3) & ~@as(usize, 3);
+        offset += aligned_size;
+    }
+}
 
-    voice.setOscWaveform(0, .saw);
-    voice.setOscWaveform(1, .sine);
-    voice.setOscWaveform(2, .saw);
+fn initMidi() !void {
+    const client_name = cfString("Blue J Midi Client");
+    defer c.CFRelease(client_name);
 
-    voice.setOscDetune(1, -5.0);
-    voice.setOscDetune(2, 7.0);
+    if (c.MIDIClientCreate(
+        client_name,
+        null,
+        null,
+        &midi_client,
+    ) != c.noErr) {
+        return error.MidiClientCreateFailed;
+    }
 
-    voice.setOscLevel(0, 1.0);
-    voice.setOscLevel(1, 0.7);
-    voice.setOscLevel(2, 0.7);
 
-    voice.lfo1.osc.setWaveform(.sine);
-    voice.lfo2.osc.setWaveform(.sine);
+    const port_name = cfString("Blue J Midi In");
+    defer c.CFRelease(port_name);
+
+    if (c.MIDIInputPortCreate(
+        midi_client,
+        port_name,
+        midiReadCallback,
+        null,
+        &midi_input_port,
+    ) != c.noErr) {
+        return error.MidiInputPortCreateFailed;
+    }
+
+    // Connect to all MIDI sources
+    const source_count = c.MIDIGetNumberOfSources();
+    var i: u32 = 0;
+    while (i < source_count) : (i += 1) {
+        const src = c.MIDIGetSource(i);
+        if (src != 0) {
+            _ = c.MIDIPortConnectSource(
+                midi_input_port,
+                src,
+                null,
+            );
+        }
+    }
 
 }
 
 pub fn start() !void {
     std.debug.print("macOS audio start\n", .{});
     const thread = try std.Thread.spawn(.{}, tui.run, .{&shared_params});
-    // try tui.run(&shared_params);
 
+    try initMidi();     
     createAudioUnit() catch |e| {
         std.debug.print("Audio init error: {}\n", .{e});
         return;
@@ -116,7 +233,6 @@ fn semitonesToFreq(base: f32, semitones: i32) f32 {
 }
 
 inline fn lfoSample(lfo: *synth.LFO) f32 {
-    // LFO oscillator already outputs -1..1
     return lfo.osc.nextSample();
 }
 
@@ -152,11 +268,13 @@ fn renderCallback(
         const lfo1 = lfoSample(&voice.lfo1);
         const lfo2 = lfoSample(&voice.lfo2);
 
-        if (arp_sample_counter == 0) {
-            const note = sequencer.freq_steps[arp_step].load(.acquire);
-            if (note > -1.0) {
-                voice.noteOn(note);
-            } else if (note == -1.0) voice.noteOff();
+        if (shared_params.sequencer_enabled.load(.acquire) > 0.0 and arp_sample_counter == 0) {
+            const note = sequencer.midi_steps[arp_step].load(.acquire);
+            const freq = sequencer.freq_steps[arp_step].load(.acquire);
+            if (freq > -1.0) {
+                voice.noteOn(freq, @as(u8, @intFromFloat(note)));
+            } 
+            else if (freq == -1.0 and note >= 0) voice.noteOff(@as(u8, @intFromFloat(note)));
 
             arp_step += 1;
             if (@as(f32, @floatFromInt(arp_step)) >= shared_params.sequencer_len.load(.acquire)) arp_step = 0;
@@ -168,7 +286,7 @@ fn renderCallback(
 
 
         const base_cutoff =
-            shared_params.cutoff.load(.acquire);
+            shared_params.filter_cutoff.load(.acquire);
 
         voice.base_cutoff =
             applyLfo(
@@ -184,7 +302,7 @@ fn renderCallback(
             );
 
         const base_res =
-            shared_params.resonance.load(.acquire);
+            shared_params.filter_resonance.load(.acquire);
 
         voice.filter_resonance =
             std.math.clamp(
@@ -211,7 +329,7 @@ fn renderCallback(
             (lfo1 * shared_params.lfo1_amp.load(.acquire) +
              lfo2 * shared_params.lfo2_amp.load(.acquire));
 
-        // Hard gate (square wave works best)
+        // Hard gate 
         const vol_lfo =
             (lfo1 * shared_params.lfo1_volume.load(.acquire) +
              lfo2 * shared_params.lfo2_volume.load(.acquire));
@@ -227,7 +345,7 @@ fn renderCallback(
 
 
         voice.drive =
-            shared_params.drive.load(.acquire);
+            shared_params.master_drive.load(.acquire);
 
         // === Amp envelope ===
         voice.amp_env.attack_time =
@@ -257,14 +375,17 @@ fn renderCallback(
         voice.filter_env.release_time =
             shared_params.filter_release.load(.acquire);
 
+        voice.filter_feedback =
+            shared_params.filter_feedback.load(.acquire);
+
         voice.filter_env.recalc();
 
         // === Modulation / performance ===
         voice.portamento_time =
-            shared_params.portamento.load(.acquire);
+            shared_params.perf_portamento.load(.acquire);
 
         voice.key_tracking_amount =
-            shared_params.key_tracking.load(.acquire);
+            shared_params.filter_key_tracking.load(.acquire);
 
         // === LFO 1 params ===
         voice.lfo1.freq_hz =
@@ -303,6 +424,17 @@ fn renderCallback(
         voice.osc_params[0].waveform =
             @enumFromInt(osc1_wave_idx);
 
+        const osc1_wave2_idx: u8 = @min(
+            waveform_count - 1,
+            @as(u8, @intFromFloat(
+                shared_params.osc1_wave2.load(.acquire)))
+        );
+        voice.osc_params[0].waveform2 =
+            @enumFromInt(osc1_wave2_idx);
+
+        voice.osc_params[0].crossfade_rate =
+            shared_params.osc1_crossfade.load(.acquire);
+
         voice.osc_params[0].level =
             shared_params.osc1_level.load(.acquire);
 
@@ -321,6 +453,8 @@ fn renderCallback(
             @intFromFloat(
                 shared_params.osc1_unison_count.load(.acquire));
 
+        voice.oscs[0].high = if (shared_params.osc1_high.load(.acquire) > 0.0) true else false;
+
         // Osc 2
         const osc2_wave_idx: u8 = @min(
             waveform_count - 1,
@@ -330,6 +464,14 @@ fn renderCallback(
         voice.osc_params[1].waveform =
             @enumFromInt(osc2_wave_idx);
 
+        const osc2_wave2_idx: u8 = @min(
+            waveform_count - 1,
+            @as(u8, @intFromFloat(
+                shared_params.osc2_wave2.load(.acquire)))
+        );
+        voice.osc_params[1].waveform2 =
+            @enumFromInt(osc2_wave2_idx);
+
         voice.osc_params[1].semitone =
             @intFromFloat(
                 shared_params.osc2_semitones.load(.acquire));
@@ -337,6 +479,9 @@ fn renderCallback(
         voice.osc_params[1].octave =
             @intFromFloat(
                 shared_params.osc2_octave.load(.acquire));
+
+        voice.osc_params[1].crossfade_rate =
+            shared_params.osc2_crossfade.load(.acquire);
 
         voice.osc_params[1].level =
             shared_params.osc2_level.load(.acquire);
@@ -348,6 +493,8 @@ fn renderCallback(
             @intFromFloat(
                 shared_params.osc2_unison_count.load(.acquire));
 
+        voice.oscs[1].high = if (shared_params.osc2_high.load(.acquire) > 0.0) true else false;
+
         // Osc 3
         const osc3_wave_idx: u8 = @min(
             waveform_count - 1,
@@ -357,6 +504,14 @@ fn renderCallback(
         voice.osc_params[2].waveform =
             @enumFromInt(osc3_wave_idx);
 
+        const osc3_wave2_idx: u8 = @min(
+            waveform_count - 1,
+            @as(u8, @intFromFloat(
+                shared_params.osc3_wave2.load(.acquire)))
+        );
+        voice.osc_params[2].waveform2 =
+            @enumFromInt(osc3_wave2_idx);
+
         voice.osc_params[2].semitone =
             @intFromFloat(
                 shared_params.osc3_semitones.load(.acquire));
@@ -364,6 +519,9 @@ fn renderCallback(
         voice.osc_params[2].octave =
             @intFromFloat(
                 shared_params.osc3_octave.load(.acquire));
+
+        voice.osc_params[2].crossfade_rate =
+            shared_params.osc3_crossfade.load(.acquire);
 
         voice.osc_params[2].level =
             shared_params.osc3_level.load(.acquire);
@@ -374,6 +532,8 @@ fn renderCallback(
         voice.oscs[2].unison_count =
             @intFromFloat(
                 shared_params.osc3_unison_count.load(.acquire));
+
+        voice.oscs[2].high = if (shared_params.osc3_high.load(.acquire) > 0.0) true else false;
 
         // voice.delay.delay_time_ms =
         //         shared_params.delay_time_ms.load(.acquire);
@@ -415,7 +575,6 @@ fn createAudioUnit() !void {
     if (c.AudioComponentInstanceNew(comp, &audio_unit) != c.noErr)
         return error.AudioUnitCreateFailed;
 
-    // Set render callback
     var cb = c.AURenderCallbackStruct{
         .inputProc = renderCallback,
         .inputProcRefCon = null,

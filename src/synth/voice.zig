@@ -6,26 +6,29 @@ const ADSR = @import("adsr.zig").ADSR;
 const LowPassFilter = @import("filter.zig").LowPassFilter;
 const ResonantLPF = @import("filter.zig").ResonantLPF;
 const LadderLPF = @import("filter.zig").LadderLPF;
+const Reverb = @import("effects.zig").Reverb;
 
 pub const MAX_OSCS: usize = 3;
 const TABLE_SIZE: usize = 2048;
 
-/// Per-oscillator configuration
 pub const OscParams = struct {
     level: f32 = 1.0,
     detune_cents: f32 = 0.0,
     waveform: Oscillator.Waveform = .saw,
+    waveform2: Oscillator.Waveform = .saw,
     octave: i8 = 0,
     semitone: i8 = 0,
+    high: bool = false,
+    crossfade_rate: f32 = 0.0,
 };
 
 
 pub const LfoRouting = struct {
-    cutoff: f32 = 0.0,   // Hz depth
-    resonance: f32 = 0.0, // 0..1
-    pitch: f32 = 0.0,    // semitones
-    amp: f32 = 0.0,      // bipolar tremolo
-    volume: f32 = 0.0,   // post-amp volume modulation
+    cutoff: f32 = 0.0,   
+    resonance: f32 = 0.0, 
+    pitch: f32 = 0.0,   
+    amp: f32 = 0.0,      
+    volume: f32 = 0.0,   
 };
 
 
@@ -34,10 +37,9 @@ pub const LFO = struct {
     freq_hz: f32 = 1.0,
     depth: f32 = 1.0,
     routing: LfoRouting,
-    value: f32 = 0.0, // cached output (-1..1)
+    value: f32 = 0.0, 
 };
 
-/// Monophonic synth voice
 pub const Voice = struct {
     oscs: [MAX_OSCS]Oscillator,
     osc_params: [MAX_OSCS]OscParams,
@@ -46,7 +48,7 @@ pub const Voice = struct {
     lfo2: LFO,
 
     lfo_counter: u32 = 0,
-    lfo_update_rate: u32 = 32, // control-rate (samples)
+    lfo_update_rate: u32 = 32, 
     
     master_volume: f32 = 0.8,
     drive: f32 = 2.5,
@@ -54,27 +56,34 @@ pub const Voice = struct {
     active: bool = false,
     base_freq: f32 = 0.0,
 
-    current_freq: f32 = 0.0,
-    target_freq: f32 = 0.0,
-    portamento_time: f32 = 0.0, // seconds
+    low_note: ?u8 = null,
+    high_note: ?u8 = null,
+
+    low_freq: f32 = 0.0,
+    high_freq: f32 = 0.0,
+
+    current_low_freq: f32 = 0.0,
+    current_high_freq: f32 = 0.0,
+
+    portamento_time: f32 = 0.0, 
     portamento_step: f32 = 0.0,
-    key_tracking_amount: f32,  // e.g., 0.0 .. 1.0
-    midi_note: u8,             // for key tracking
+    key_tracking_amount: f32,      
+    midi_note: u8,             
 
     amp_env: ADSR,
     filter_env: ADSR,
 
     filter: LadderLPF,
-    // filter: ResonantLPF,
-    filter_resonance: f32 = 0.5, // 0..0.99
+    filter_resonance: f32 = 0.5, 
+    filter_feedback: f32 = 0.00,
+    filter_feedback_z: f32 = 0.00,
 
     base_cutoff: f32 = 200.0,
     filter_env_amount: f32 = 6000.0,
 
-    /// Initialize voice and internal oscillators
+    // reverb: Reverb,
 
-
-    pub fn init(tables: Wavetables, sample_rate: f32) Voice {
+    pub fn init(tables: Wavetables, sample_rate: f32) !Voice {
         var v = Voice{
             .oscs = undefined,
             .osc_params = undefined,
@@ -82,12 +91,9 @@ pub const Voice = struct {
             .amp_env = ADSR.init(sample_rate),
             .filter_env = ADSR.init(sample_rate),
             .filter = LadderLPF.init(sample_rate),
-            // .filter = ResonantLPF.init(sample_rate),
 
             .key_tracking_amount = 0.0,
-            .midi_note = 69, //A4
-            //
-
+            .midi_note = 69, 
             .lfo1 = .{
                 .osc = Oscillator.init(tables),
                 .routing = .{}
@@ -97,6 +103,7 @@ pub const Voice = struct {
                 .routing = .{}
             },
 
+            // .reverb = try Reverb.init(sample_rate, 0.02),
         };
 
         for (&v.oscs, &v.osc_params) |*osc, *params| {
@@ -106,53 +113,61 @@ pub const Voice = struct {
 
         v.oscs[0].sync_slave1 = &v.oscs[1];
         v.oscs[0].sync_slave2 = &v.oscs[2];
+        v.oscs[2].high = true;
+
 
         return v;
     }
 
+    pub fn noteOn(self: *Voice, freq: f32, note: u8) void {
+        const was_inactive = (self.low_note == null);
 
+        if (self.low_note == null) {
+            self.low_note = note;
+            self.low_freq = freq;
 
-    // ------------------------
-    // NOTE CONTROL
-    // ------------------------
+            self.midi_note = note;
+            self.current_low_freq = freq;
+        }
+        else {
+            if (note > self.low_note.?) {
+                self.high_note = note;
+                self.high_freq = freq;
+            } else {
+                self.high_note = self.low_note;
+                self.high_freq = self.low_freq;
 
+                self.low_note = note;
+                self.low_freq = freq;
 
-    pub fn noteOn(self: *Voice, freq: f32) void {
-        self.target_freq = freq;
+                self.midi_note = note;
+                self.current_low_freq = freq;
+            }
+        }
 
-        if (self.active and self.portamento_time > 0.0) {
-            // Glide: compute per-sample increment
-            const delta = self.target_freq - self.current_freq;
-            self.portamento_step = delta / (self.portamento_time * self.amp_env.sample_rate);
-        } else {
-            self.current_freq = freq;
-            self.portamento_step = 0.0;
+        if (was_inactive) {
+            self.amp_env.noteOn();
+            self.filter_env.noteOn();
         }
 
         self.active = true;
-        self.amp_env.noteOn();
-        self.filter_env.noteOn();
     }
 
+    pub fn noteOff(self: *Voice, note: u8) void {
+        if (self.low_note != null and self.low_note.? == note) {
+            self.low_note = self.high_note;
+            self.low_freq = self.high_freq;
+            self.current_low_freq = self.current_high_freq;
 
-    pub fn noteOff(self: *Voice) void {
-        self.amp_env.noteOff();
-        self.filter_env.noteOff();
-    }
+            self.high_note = null;
+        } else if (self.high_note != null and self.high_note.? == note) {
+            self.high_note = null;
+        }
 
-    // ------------------------
-    // OSC CONTROL
-    // ------------------------
-
-    pub fn setOscLevel(self: *Voice, index: usize, level: f32) void {
-        if (index >= MAX_OSCS) return;
-        self.osc_params[index].level = level;
-    }
-
-    pub fn setOscDetune(self: *Voice, index: usize, cents: f32) void {
-        if (index >= MAX_OSCS) return;
-        self.osc_params[index].detune_cents = cents;
-        self.updateOscFrequencies();
+        if (self.low_note == null and self.high_note == null) {
+            self.amp_env.noteOff();
+            self.filter_env.noteOff();
+        }
     }
 
     pub fn setOscWaveform(
@@ -182,14 +197,14 @@ pub fn nextSample(self: *Voice) [2]f32 {
     }
 
     if (self.portamento_time == 0.0) {
-        self.current_freq = self.target_freq;
+        self.current_low_freq = self.low_freq;
         self.portamento_step = 0.0;
     } else if (self.portamento_step != 0.0) {
-        const delta = self.target_freq - self.current_freq;
+        const delta = self.low_freq - self.current_low_freq;
         if (@abs(delta) <= @abs(self.portamento_step)) {
-            self.current_freq = self.target_freq;
+            self.current_low_freq = self.low_freq;
         } else {
-            self.current_freq += self.portamento_step;
+            self.current_low_freq += self.portamento_step;
         }
     }
 
@@ -202,14 +217,32 @@ pub fn nextSample(self: *Voice) [2]f32 {
     const pitch_ratio =
         std.math.pow(f32, 2.0, pitch_mod_semitones / 12.0);
 
-    self.base_freq = self.current_freq * pitch_ratio;
-
+    self.base_freq = self.current_low_freq * pitch_ratio;
+    if (self.high_note == null) {
+        self.high_freq = self.low_freq;
+    }
 
     for (&self.oscs, self.osc_params) |*osc, params| {
         const cents = pitchOffsetCents(params);
 
-        osc.setFrequency(self.base_freq * centsToRatio(cents));
+
+        if (osc.high and self.high_note != null) {
+            osc.setFrequency(
+                self.high_freq *
+                pitch_ratio *
+                centsToRatio(cents)
+            );
+        } else if (self.low_note != null) {
+            osc.setFrequency(
+                self.low_freq *
+                pitch_ratio *
+                centsToRatio(cents)
+            );
+        }
+
+        osc.crossfade_rate = params.crossfade_rate;
         osc.setWaveform(params.waveform);
+        osc.waveform2 = params.waveform2;
 
         if (osc.sync_slave1) |slave| {
             if (osc.phase >= @as(f32, TABLE_SIZE)) {
@@ -229,6 +262,7 @@ pub fn nextSample(self: *Voice) [2]f32 {
     if (!self.amp_env.isActive()) {
         self.active = false;
         self.filter.reset();
+        // self.filter_feedback_z = 0.0; 
         return [2]f32{0.0, 0.0 };
     }
 
@@ -247,9 +281,13 @@ pub fn nextSample(self: *Voice) [2]f32 {
 
     mix = std.math.tanh(mix * self.drive);
 
+
+    const key_note_offset: f32 =
+        @as(f32, @floatFromInt(@as(i16, self.midi_note) - 69));
+
     const key_mod =
-        self.key_tracking_amount *
-        @as(f32, @floatFromInt(self.midi_note - 69)); // A4 reference
+        self.key_tracking_amount * key_note_offset;
+
 
 
     var cutoff = self.base_cutoff;
@@ -271,16 +309,19 @@ pub fn nextSample(self: *Voice) [2]f32 {
     resonance = std.math.clamp(resonance, 0.0, 0.99);
     self.filter.setResonance(resonance);
 
+    const fb =
+        self.filter_feedback *
+        self.filter_feedback_z;
 
-    var filtered = self.filter.process(mix);
+    const filter_input = mix + fb;
 
+    var filtered = self.filter.process(filter_input);
+
+    self.filter_feedback_z = filtered;
     filtered = std.math.tanh(filtered * self.drive);
 
-
-    // --- AMP MOD (musical tremolo) ---
     var amp_mod: f32 = 1.0;
 
-    // Square wave tremolo should be unipolar
     if (self.lfo1.routing.amp > 0.0) {
         const t = bipolarToUnipolar(self.lfo1.value);
         amp_mod *= std.math.lerp(
@@ -301,7 +342,6 @@ pub fn nextSample(self: *Voice) [2]f32 {
 
     amp_mod = std.math.clamp(amp_mod, 0.0, 1.0);
 
-    // --- VOLUME MOD (hard chop / gate) ---
     var volume_mod: f32 = 1.0;
 
     if (self.lfo1.routing.volume > 0.0) {
@@ -326,7 +366,10 @@ pub fn nextSample(self: *Voice) [2]f32 {
         amp_mod *
         self.master_volume *
         volume_mod; 
-        const stereo_out = [2]f32{mono_out, mono_out};
+
+    const stereo_out = [2]f32{mono_out, mono_out};
+
+    // stereo_out = self.reverb.process(stereo_out);
 
     return stereo_out;
 }
@@ -357,7 +400,6 @@ fn bipolarToUnipolar(x: f32) f32 {
 }
 
 fn hardTremolo(x: f32) f32 {
-    // square-wave style gating
     return if (x > 0.0) 1.0 else 0.0;
 }
 

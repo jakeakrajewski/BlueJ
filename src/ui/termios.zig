@@ -2,17 +2,87 @@ const std = @import("std");
 const c = @cImport({
     @cInclude("termios.h");
 });
+const midi_learn_state = @import("../midi/controls.zig").midi_learn_state;
 
 const stdin_fd = std.posix.STDIN_FILENO;
 const stdout_fd = std.posix.STDOUT_FILENO;
 
+const ANSI_RESET = "\x1b[0m";
+const ANSI_REVERSE = "\x1b[7m";
+
+const ViewHeader = struct {
+    key: u8,
+    name: []const u8,
+    view: ViewMode,
+};
+
+const VIEW_HEADERS = [_]ViewHeader{
+    .{ .key = 'm', .name = "aster", .view = .Master },
+    .{ .key = 'p', .name = "erf", .view = .Performance },
+    .{ .key = 'a', .name = "mp", .view = .Amp },
+    .{ .key = 'f', .name = "ilter", .view = .Filter },
+    .{ .key = 'l', .name = "FO", .view = .LFO },
+    .{ .key = 'o', .name = "sc", .view = .Oscillators },
+    .{ .key = 's', .name = "eq", .view = .Sequencer },
+};
+
+
+fn drawViewHeader(writer: *std.io.Writer) void {
+    for (VIEW_HEADERS) |h| {
+        if (h.view == current_view) {
+            _ = writer.print(
+                "{s}[{c}]{s}{s} ",
+                .{ ANSI_REVERSE, h.key, h.name, ANSI_RESET },
+            ) catch {};
+        } else {
+            _ = writer.print(
+                "[{c}]{s} ",
+                .{ h.key, h.name },
+            ) catch {};
+        }
+    }
+
+    _ = writer.writeAll("\r\n\r\n") catch {};
+}
+
+fn drawSubHeader(writer: *std.io.Writer) void {
+    switch (current_view) {
+        .Oscillators => {
+            for (1..4) |i| {
+                if (i == active_osc) {
+                    _ = writer.print(
+                        "{s}[Osc {d}]{s} ",
+                        .{ ANSI_REVERSE, i, ANSI_RESET },
+                    ) catch {};
+                } else {
+                    _ = writer.print("[Osc {d}] ", .{ i }) catch {};
+                }
+            }
+            _ = writer.writeAll("\r\n\r\n") catch {};
+        },
+
+        .LFO => {
+            for (1..3) |i| {
+                if (i == active_lfo) {
+                    _ = writer.print(
+                        "{s}[LFO {d}]{s} ",
+                        .{ ANSI_REVERSE, i, ANSI_RESET },
+                    ) catch {};
+                } else {
+                    _ = writer.print("[LFO {d}] ", .{ i }) catch {};
+                }
+            }
+            _ = writer.writeAll("\r\n\r\n") catch {};
+        },
+
+        else => {},
+    }
+}
+
 pub var sequencer: Sequencer = undefined;
 
 pub const Sequencer = struct {
-    /// Frequency used by audio engine
     freq_steps: [32]std.atomic.Value(f32),
-
-    /// MIDI note stored only for UI display
     midi_steps: [32]std.atomic.Value(f32),
 
     running: bool = false,
@@ -64,26 +134,31 @@ fn midiNoteToFreq(note: i8) f32 {
             (@as(f32, @floatFromInt(note)) - 69.0) / 12.0);
 }
 
+const ViewMode = enum { Master, Performance, Amp, Filter, LFO, Oscillators, Sequencer };
+var current_view: ViewMode = .Master;
+var active_osc: u8 = 1; // 1,2,3
+var active_lfo: u8 = 1; // 1,2
+
 pub const SharedParams = struct {
-    sequencer_tempo: std.atomic.Value(f32),
-    cutoff: std.atomic.Value(f32),
-    resonance: std.atomic.Value(f32),
 
     master_volume: std.atomic.Value(f32),
-    drive: std.atomic.Value(f32),
+    master_drive: std.atomic.Value(f32),
 
     amp_attack: std.atomic.Value(f32),
     amp_decay: std.atomic.Value(f32),
     amp_sustain: std.atomic.Value(f32),
     amp_release: std.atomic.Value(f32),
 
+    filter_cutoff: std.atomic.Value(f32),
+    filter_resonance: std.atomic.Value(f32),
     filter_attack: std.atomic.Value(f32),
     filter_decay: std.atomic.Value(f32),
     filter_sustain: std.atomic.Value(f32),
     filter_release: std.atomic.Value(f32),
+    filter_feedback: std.atomic.Value(f32),
+    filter_key_tracking: std.atomic.Value(f32),
 
-    portamento: std.atomic.Value(f32),
-    key_tracking: std.atomic.Value(f32),
+    perf_portamento: std.atomic.Value(f32),
 
     // LFO 1
     lfo1_rate: std.atomic.Value(f32),
@@ -104,26 +179,37 @@ pub const SharedParams = struct {
     lfo2_volume: std.atomic.Value(f32),
 
     osc1_wave: std.atomic.Value(f32),
+    osc1_wave2: std.atomic.Value(f32),
+    osc1_crossfade: std.atomic.Value(f32),
     osc1_level: std.atomic.Value(f32),
     osc1_octave: std.atomic.Value(f32),
     osc1_semitones: std.atomic.Value(f32),
     osc1_detune: std.atomic.Value(f32),
     osc1_unison_count: std.atomic.Value(f32),
+    osc1_high: std.atomic.Value(f32),
 
     osc2_wave: std.atomic.Value(f32),
+    osc2_wave2: std.atomic.Value(f32),
+    osc2_crossfade: std.atomic.Value(f32),
     osc2_level: std.atomic.Value(f32),
     osc2_octave: std.atomic.Value(f32),
     osc2_semitones: std.atomic.Value(f32),
     osc2_detune: std.atomic.Value(f32),
     osc2_unison_count: std.atomic.Value(f32),
+    osc2_high: std.atomic.Value(f32),
 
     osc3_wave: std.atomic.Value(f32),
+    osc3_wave2: std.atomic.Value(f32),
+    osc3_crossfade: std.atomic.Value(f32),
     osc3_level: std.atomic.Value(f32),
     osc3_octave: std.atomic.Value(f32),
     osc3_semitones: std.atomic.Value(f32),
     osc3_detune: std.atomic.Value(f32),
     osc3_unison_count: std.atomic.Value(f32),
+    osc3_high: std.atomic.Value(f32),
 
+    sequencer_enabled: std.atomic.Value(f32),
+    sequencer_tempo: std.atomic.Value(f32),
     sequencer_index: std.atomic.Value(f32),
     sequencer_len: std.atomic.Value(f32),
 
@@ -133,25 +219,28 @@ pub const SharedParams = struct {
     
     pub fn init() SharedParams {
         return .{
-            .sequencer_tempo = .init(2.0),
-            .cutoff = .init(800.0),
-            .resonance = .init(0.4),
 
+            //MASTER CONTROL
             .master_volume = .init(0.8),
-            .drive = .init(1.0),
+            .master_drive = .init(1.0),
 
+            //AMP CONTROL
             .amp_attack = .init(0.01),
             .amp_decay = .init(0.1),
             .amp_sustain = .init(0.8),
             .amp_release = .init(0.2),
 
+            //FILTER CONTROL
+            .filter_cutoff = .init(800.0),
+            .filter_resonance = .init(0.4),
             .filter_attack = .init(0.01),
             .filter_decay = .init(0.1),
             .filter_sustain = .init(0.8),
             .filter_release = .init(0.2),
+            .filter_feedback = .init(0.0),
+            .filter_key_tracking = .init(1.0),
 
-            .portamento = .init(0.0),
-            .key_tracking = .init(1.0),
+            .perf_portamento = .init(0.0),
 
             // LFO 1
             .lfo1_rate = .init(2.0),
@@ -171,26 +260,39 @@ pub const SharedParams = struct {
             .lfo2_amp = .init(0.0),
             .lfo2_volume = .init(0.0),
 
-            .osc1_wave = .init(1.0),
+            .osc1_wave = .init(3.0),
+            .osc1_wave2 = .init(3.0),
+            .osc1_crossfade = .init(0.0),
             .osc1_level = .init(1.0),
             .osc1_octave = .init(0.0),
             .osc1_semitones = .init(0.0),
             .osc1_detune = .init(0.0),
             .osc1_unison_count = .init(1.0),
+            .osc1_high = .init(0.0),
 
-            .osc2_wave = .init(1.0),
-            .osc2_level = .init(0.0),
-            .osc2_octave = .init(0.0),
+            .osc2_wave = .init(3.0),
+            .osc2_wave2 = .init(3.0),
+            .osc2_crossfade = .init(0.0),
+            .osc2_level = .init(1.0),
+            .osc2_octave = .init(-1.0),
             .osc2_semitones = .init(0.0),
             .osc2_detune = .init(0.0),
             .osc2_unison_count = .init(1.0),
+            .osc2_high = .init(0.0),
 
-            .osc3_wave = .init(1.0),
-            .osc3_level = .init(0.0),
+            .osc3_wave = .init(3.0),
+            .osc3_wave2 = .init(3.0),
+            .osc3_crossfade = .init(0.0),
+            .osc3_level = .init(1.0),
             .osc3_octave = .init(0.0),
             .osc3_semitones = .init(0.0),
             .osc3_detune = .init(0.0),
             .osc3_unison_count = .init(1.0),
+            .osc3_high = .init(1.0),
+
+            //SEQUENCER CONTROL
+            .sequencer_tempo = .init(2.0),
+            .sequencer_enabled = .init(0.0),
             .sequencer_index = .init(0.0),
             .sequencer_len = .init(8.0),
 
@@ -213,6 +315,7 @@ const Param = struct {
     min: f32,
     max: f32,
     step: f32,
+    // controller_map: f32,
 
     fn inc(self: *Param) void {
         const v = self.value.load(.acquire);
@@ -272,42 +375,78 @@ fn disableRawMode(orig: *const std.posix.termios) !void {
 }
 
 fn draw(params: []Param, cursor: usize, writer: *std.io.Writer) !void {
-
     // Clear screen + home
     _ = writer.writeAll("\x1b[2J\x1b[H") catch {};
+
+    drawViewHeader(writer);
+    drawSubHeader(writer);
+
     _ = writer.writeAll("↑↓ select  ←→ adjust \r\n\r\n") catch {};
+
+    const view: []const u8 = switch(current_view) {
+        .Oscillators => "Osc",
+        .Sequencer => "Sequencer",
+        .Filter => "Filter",
+        .Master => "Master",
+        .Amp => "Amp",
+        .Performance => "Perf",
+        .LFO => "LFO",
+    };
     
+
     for (params, 0..) |p, i| {
+        if (!std.mem.startsWith(u8, p.name, view)) continue;
+        if (!paramVisible(p)) continue;
+
+        const label = stripFirstWord(p.name);
+
         if (i == cursor) {
             if (std.mem.endsWith(u8, p.name, "Wave")) {
-                _ = writer.print("> {s:<10} {s}\r\n", .{ p.name, waveName(p.get()) }) catch {};
+                _ = writer.print("> {s:<10} {s}\r\n", .{
+                    label,
+                    waveName(p.get()),
+                }) catch {};
             } else {
-                _ = writer.print("> {s:<10} {d:.3}\r\n", .{ p.name, p.get() }) catch {};
+                _ = writer.print("> {s:<10} {d:.3}\r\n", .{
+                    label,
+                    p.get(),
+                }) catch {};
             }
         } else {
             if (std.mem.endsWith(u8, p.name, "Wave")) {
-                _ = writer.print("  {s:<10} {s}\r\n", .{ p.name, waveName(p.get()) }) catch {};
+                _ = writer.print("  {s:<10} {s}\r\n", .{
+                    label,
+                    waveName(p.get()),
+                }) catch {};
             } else {
-                _ = writer.print("  {s:<10} {d:.3}\r\n", .{ p.name, p.get() }) catch {};
+                _ = writer.print("  {s:<10} {d:.3}\r\n", .{
+                    label,
+                    p.get(),
+                }) catch {};
             }
         }
     }
-    _ = writer.print("\r\n", .{  }) catch {};
-    _ = writer.print("Sequencer:\r\n", .{  }) catch {};
-    for (sequencer.midi_steps, params.len..) |p, i| {
-        var buf: [3]u8 = undefined;
-        const step: i8 = @as(i8, @intCast(i)) - @as(i8, @intCast(params.len));
-        if (i == cursor) {
-            _ = writer.print("> [ {s} ]", .{ midiToName(@intFromFloat(p.load(.acquire)), &buf) }) catch {};
-        } else {
-            _ = writer.print("  [ {s} ]", .{ midiToName(@intFromFloat(p.load(.acquire)), &buf) }) catch {};
-        }
-        if (step > 0 and @mod(step + 1 , 8) == 0){
-            _ = writer.print("\r\n", .{  }) catch {};
+
+
+    if (current_view == .Sequencer){
+        _ = writer.print("\r\n", .{  }) catch {};
+        _ = writer.print("Sequencer:\r\n", .{  }) catch {};
+        for (sequencer.midi_steps, params.len..) |p, i| {
+            var buf: [3]u8 = undefined;
+            const step: i8 = @as(i8, @intCast(i)) - @as(i8, @intCast(params.len));
+            if (i == cursor) {
+                _ = writer.print("> [ {s} ]", .{ midiToName(@intFromFloat(p.load(.acquire)), &buf) }) catch {};
+            } else {
+                _ = writer.print("  [ {s} ]", .{ midiToName(@intFromFloat(p.load(.acquire)), &buf) }) catch {};
+            }
+            if (step > 0 and @mod(step + 1 , 8) == 0){
+                _ = writer.print("\r\n", .{  }) catch {};
+            }
         }
     }
     writer.flush() catch {};
 }
+
 pub fn run(shared: *SharedParams) !void {
 
     var buffer: [4096]u8 = undefined;
@@ -318,12 +457,9 @@ pub fn run(shared: *SharedParams) !void {
 
 
     var params = [_]Param{
-        .{ .name = "Sequencer Speed", .value = &shared.sequencer_tempo, .min = 1.0, .max = 20.0, .step = 0.25 },
-        .{ .name = "Cutoff", .value = &shared.cutoff, .min = 20.0, .max = 8000.0, .step = 20.0 },
-        .{ .name = "Resonance", .value = &shared.resonance, .min = 0.0, .max = 1.0, .step = 0.02 },
 
         .{ .name = "Master Volume", .value = &shared.master_volume, .min = 0.0, .max = 1.0, .step = 0.02 },
-        .{ .name = "Drive", .value = &shared.drive, .min = 1.0, .max = 4.0, .step = 0.02 },
+        .{ .name = "Master Drive", .value = &shared.master_drive, .min = 1.0, .max = 4.0, .step = 0.02 },
 
         // Amp envelope
         .{ .name = "Amp Attack", .value = &shared.amp_attack, .min = 0.001, .max = 2.0, .step = 0.01 },
@@ -332,13 +468,16 @@ pub fn run(shared: *SharedParams) !void {
         .{ .name = "Amp Release", .value = &shared.amp_release, .min = 0.001, .max = 5.0, .step = 0.05 },
 
         // Filter envelope
-        .{ .name = "Filt Attack", .value = &shared.filter_attack, .min = 0.001, .max = 2.0, .step = 0.01 },
-        .{ .name = "Filt Decay", .value = &shared.filter_decay, .min = 0.001, .max = 2.0, .step = 0.01 },
-        .{ .name = "Filt Sustain", .value = &shared.filter_sustain, .min = 0.0, .max = 1.0, .step = 0.02 },
-        .{ .name = "Filt Release", .value = &shared.filter_release, .min = 0.001, .max = 5.0, .step = 0.05 },
+        .{ .name = "Filter Cutoff", .value = &shared.filter_cutoff, .min = 20.0, .max = 8000.0, .step = 20.0 },
+        .{ .name = "Filter Resonance", .value = &shared.filter_resonance, .min = 0.0, .max = 1.0, .step = 0.02 },
+        .{ .name = "Filter Attack", .value = &shared.filter_attack, .min = 0.001, .max = 2.0, .step = 0.01 },
+        .{ .name = "Filter Decay", .value = &shared.filter_decay, .min = 0.001, .max = 2.0, .step = 0.01 },
+        .{ .name = "Filter Sustain", .value = &shared.filter_sustain, .min = 0.0, .max = 1.0, .step = 0.02 },
+        .{ .name = "Filter Release", .value = &shared.filter_release, .min = 0.001, .max = 5.0, .step = 0.05 },
+        .{ .name = "Filter Key Track", .value = &shared.filter_key_tracking, .min = 0.0, .max = 1.0, .step = 0.05 },
+        .{ .name = "Filter Feedback", .value = &shared.filter_feedback, .min = 0.00, .max = 0.25, .step = 0.01 },
 
-        .{ .name = "Portamento", .value = &shared.portamento, .min = 0.0, .max = 1.0, .step = 0.01 },
-        .{ .name = "Key Track", .value = &shared.key_tracking, .min = 0.0, .max = 1.0, .step = 0.05 },
+        .{ .name = "Perf Portamento", .value = &shared.perf_portamento, .min = 0.0, .max = 1.0, .step = 0.01 },
 
         // -------- LFO 1 --------
         .{ .name = "LFO1 Rate", .value = &shared.lfo1_rate, .min = 0.05, .max = 20.0, .step = 0.05 },
@@ -360,28 +499,39 @@ pub fn run(shared: *SharedParams) !void {
 
         // Osc 1
         .{ .name = "Osc1 Wave", .value = &shared.osc1_wave, .min = 1.0, .max = 4.0, .step = 1.0 },
+        .{ .name = "Osc1 Wave2", .value = &shared.osc1_wave2, .min = 1.0, .max = 4.0, .step = 1.0 },
+        .{ .name = "Osc1 Crossfade", .value = &shared.osc1_crossfade, .min = 0.05, .max = 20.0, .step = 0.05 },
         .{ .name = "Osc1 Level", .value = &shared.osc1_level, .min = 0.0, .max = 1.0, .step = 0.05 },
         .{ .name = "Osc1 Octave", .value = &shared.osc1_octave, .min = -4.0, .max = 4.0, .step = 1.00 },
         .{ .name = "Osc1 Semitones", .value = &shared.osc1_semitones, .min = -12.0, .max = 12.0, .step = 1.00 },
         .{ .name = "Osc1 Unison", .value = &shared.osc1_unison_count, .min = 1.0, .max = 8.0, .step = 1.0 },
         .{ .name = "Osc1 Detune", .value = &shared.osc1_detune, .min = 0.0, .max = 100.0, .step = 1.0 },
+        .{ .name = "Osc1 Voice Priority", .value = &shared.osc1_high, .min = 0.0, .max = 1.0, .step = 1.0 },
 
         // Osc 2
         .{ .name = "Osc2 Wave", .value = &shared.osc2_wave, .min = 1.0, .max = 4.0, .step = 1.0 },
+        .{ .name = "Osc2 Wave2", .value = &shared.osc2_wave2, .min = 1.0, .max = 4.0, .step = 1.0 },
+        .{ .name = "Osc2 Crossfade", .value = &shared.osc2_crossfade, .min = 0.05, .max = 20.0, .step = 0.05 },
         .{ .name = "Osc2 Level", .value = &shared.osc2_level, .min = 0.0, .max = 1.0, .step = 0.05 },
         .{ .name = "Osc2 Octave", .value = &shared.osc2_octave, .min = -4.0, .max = 4.0, .step = 1.00 },
         .{ .name = "Osc2 Semitones", .value = &shared.osc2_semitones, .min = -12.0, .max = 12.0, .step = 1.00 },
         .{ .name = "Osc2 Unison", .value = &shared.osc2_unison_count, .min = 1.0, .max = 8.0, .step = 1.0 },
         .{ .name = "Osc2 Detune", .value = &shared.osc2_detune, .min = 0.0, .max = 100.0, .step = 1.0 },
+        .{ .name = "Osc2 Voice Priority", .value = &shared.osc2_high, .min = 0.0, .max = 1.0, .step = 1.0 },
 
         // Osc 3
         .{ .name = "Osc3 Wave", .value = &shared.osc3_wave, .min = 1.0, .max = 4.0, .step = 1.0 },
+        .{ .name = "Osc3 Wave2", .value = &shared.osc3_wave2, .min = 1.0, .max = 4.0, .step = 1.0 },
+        .{ .name = "Osc3 Crossfade", .value = &shared.osc3_crossfade, .min = 0.05, .max = 20.0, .step = 0.05 },
         .{ .name = "Osc3 Level", .value = &shared.osc3_level, .min = 0.0, .max = 1.0, .step = 0.05 },
         .{ .name = "Osc3 Octave", .value = &shared.osc3_octave, .min = -4.0, .max = 4.0, .step = 1.00 },
         .{ .name = "Osc3 Semitones", .value = &shared.osc3_semitones, .min = -12.0, .max = 12.0, .step = 1.00 },
         .{ .name = "Osc3 Unison", .value = &shared.osc3_unison_count, .min = 1.0, .max = 8.0, .step = 1.0 },
         .{ .name = "Osc3 Detune", .value = &shared.osc3_detune, .min = -100.0, .max = 100.0, .step = 1.0 },
+        .{ .name = "Osc3 Voice Priority", .value = &shared.osc3_high, .min = 0.0, .max = 1.0, .step = 1.0 },
 
+        .{ .name = "Sequencer Enabled", .value = &shared.sequencer_enabled, .min = 0.0, .max = 1.0, .step = 1.0 },
+        .{ .name = "Sequencer Speed", .value = &shared.sequencer_tempo, .min = 1.0, .max = 20.0, .step = 0.25 },
         .{ .name = "Sequencer Position", .value = &shared.sequencer_index, .min = 1.0, .max = 32.0, .step = 1.0 },
         .{ .name = "Sequence Length", .value = &shared.sequencer_len, .min = 0.0, .max = 32.0, .step = 1.0 },
 
@@ -399,11 +549,86 @@ pub fn run(shared: *SharedParams) !void {
     while (true) {
         try draw(&params, cursor, &writer);
 
+        const view = switch(current_view){
+            .Oscillators => "Osc",
+            .Sequencer => "Sequencer",
+            .Filter => "Filter",
+            .Master => "Master",
+            .Amp => "Amp",
+            .Performance => "Perf",
+            .LFO => "LFO",
+        };
+
         const n = try std.posix.read(stdin_fd, &buf);
 
         // Single-key commands
         if (n == 1) {
             switch (buf[0]) {
+                '1', '2', '3' => {
+                    const v: u8 = buf[0] - '0';
+
+                    switch (current_view) {
+                        .Oscillators => {
+                            if (v <= 3) {
+                                active_osc = v;
+                                cursor = findFirstIndex(0, &params,
+                                    switch (v) {
+                                        1 => "Osc1",
+                                        2 => "Osc2",
+                                        3 => "Osc3",
+                                        else => unreachable,
+                                    }
+                                );
+                            }
+                        },
+
+                        .LFO => {
+                            if (v <= 2) {
+                                active_lfo = v;
+                                cursor = findFirstIndex(0, &params,
+                                    if (v == 1) "LFO1" else "LFO2"
+                                );
+                            }
+                        },
+
+                        else => {},
+                    }
+                },
+                'm' => {
+                    current_view = .Master;
+                    cursor = findFirstIndex(0, &params, "Master");
+                },
+                'p' => {
+                    current_view = .Performance;
+                    cursor = findFirstIndex(0, &params, "Perf");
+                },
+                'l' => {
+                    current_view = .LFO;
+                    cursor = findFirstIndex(0, &params, "LFO");
+                },
+                'f' => {
+                    current_view = .Filter;
+                    cursor = findFirstIndex(0, &params, "Filter");
+                },
+                's' => {
+                    current_view = .Sequencer;
+                    cursor = findFirstIndex(0, &params, "Sequencer");
+                },
+                'o' => {
+                    current_view = .Oscillators;
+                    cursor = findFirstIndex(0, &params, "Osc");
+                },
+                'a' => {
+                    current_view = .Amp;
+                    cursor = findFirstIndex(0, &params, "Amp");
+                },
+                // 'c' => {
+                //     midi_learn_state.armed.store(true, .release);
+                //     midi_learn_state.target_param_index.store(
+                //         @intCast(cursor),
+                //         .release,
+                //     );
+                // },
                 'q' => break,
 
                 'r' => { // rest
@@ -428,8 +653,8 @@ pub fn run(shared: *SharedParams) !void {
         // Normal arrow keys
         if (n == 3 and buf[0] == 0x1b and buf[1] == '[') {
             switch (buf[2]) {
-                'A' => {if (cursor > 0) cursor -= 1;}, // up
-                'B' => {if (cursor + 1 < params.len + sequencer.freq_steps.len) cursor += 1; }, // down
+                'A' => {cursor = findFirstPrevious(cursor, &params, view);}, // up
+                'B' => {cursor = findFirstIndex(cursor, &params, view);}, // down
                 'C' => {
                     if (cursor < params.len) {
                         params[cursor].inc();
@@ -486,6 +711,22 @@ pub fn run(shared: *SharedParams) !void {
     try disableRawMode(&orig_term);
 }
 
+fn findFirstIndex(start: usize, params: []Param, contains: []const u8) usize {
+    for (start..params.len) |i| {
+        if (i == start) continue;
+        if (std.mem.startsWith(u8, params[i].name, contains)) return i;
+    }
+    return start;
+}
+
+fn findFirstPrevious(start: usize, params: []Param, contains: []const u8) usize {
+    for (1..start + 1) |i| {
+        const index = start - i;
+        if (std.mem.startsWith(u8, params[index].name, contains)) return index;
+    }
+    return start;
+}
+
 const note_names = [_][]const u8{
     "C ", "C#", "D ", "D#", "E ", "F ",
     "F#", "G ", "G#", "A ", "A#", "B ",
@@ -500,39 +741,6 @@ fn midiToName(note: i8, buf: []u8) []u8 {
     const name = note_names[@intCast(@rem(note, 12))];
     return std.fmt.bufPrint(buf, "{s}{d}", .{ name, octave }) catch &rest;
 }
-// fn midiToName(note: i8, buf: []u8) []u8 {
-//     // Require at least 5 bytes
-//     if (buf.len < 5) return buf[0..0];
-//
-//     // Default: blank
-//     @memset(buf[0..5], ' ');
-//
-//     if (note < 0) {
-//         return buf[0..5];
-//     }
-//
-//     const octave: i8 = @divFloor(note, 12) - 1;
-//     const idx: usize = @intCast(@rem(note, 12));
-//     const name = note_names[idx]; // "C" or "C#"
-//
-//     // Write note name (1–2 chars)
-//     buf[0] = name[0];
-//     if (name.len == 2) {
-//         buf[1] = '#';
-//     }
-//
-//     // Write octave right-aligned in last 2 columns
-//     // Positions: [3,4]
-//     const oct_str = std.fmt.bufPrint(buf[3..5], "{d}", .{ octave }) catch return buf[0..5];
-//
-//     // Pad if octave is 1 char
-//     if (oct_str.len == 1) {
-//         buf[4] = oct_str[0];
-//         buf[3] = ' ';
-//     }
-//
-//     return buf[0..5];
-// }
 
 fn waveName(v: f32) []const u8 {
     return switch (@as(usize, @intFromFloat(v))) {
@@ -542,5 +750,33 @@ fn waveName(v: f32) []const u8 {
         4 => "SQR",
         else => "???",
     };
+}
+
+fn paramVisible(p: Param) bool {
+    return switch (current_view) {
+        .Oscillators => blk: {
+            const prefix = switch (active_osc) {
+                1 => "Osc1",
+                2 => "Osc2",
+                3 => "Osc3",
+                else => unreachable,
+            };
+            break :blk std.mem.startsWith(u8, p.name, prefix);
+        },
+        .LFO => blk: {
+            const prefix = if (active_lfo == 1) "LFO1" else "LFO2";
+            break :blk std.mem.startsWith(u8, p.name, prefix);
+        },
+        else => true,
+    };
+}
+
+fn stripFirstWord(name: []const u8) []const u8 {
+    for (name, 0..) |n, i| {
+        if (n == ' ') {
+            return name[i + 1 ..];
+        }
+    }
+    return name;
 }
 
