@@ -88,6 +88,7 @@ pub fn build(b: *std.Build) void {
         exe.linkFramework("AudioUnit");
         exe.linkFramework("CoreAudio");
         exe.linkFramework("CoreFoundation");
+        exe.linkFramework("CoreMidi");
         exe.linkLibC();
     }
 
